@@ -13,6 +13,10 @@ It merges a PreToolUse hook and (unless --no-statusline) a statusline command
 into the given Claude Code settings file, preserving everything else in it.
 An existing statusline command is chained, not replaced: it keeps rendering
 your status line while cc-slower captures the official rate_limits data.
+Other statusLine keys (e.g. "padding") are preserved. Chaining caveat: the
+wrapped command is re-parsed by the shell, so embedded quoting (arguments
+that contain spaces) may be mangled — plain script paths and simple flags
+are fine.
 """
 
 import argparse
@@ -84,12 +88,15 @@ def main() -> int:
         pre.append({"matcher": "*", "hooks": [hook_entry]})
 
     if not args.no_statusline:
-        existing = (settings.get("statusLine") or {}).get("command", "")
+        sl = settings.get("statusLine") or {}
+        existing = sl.get("command", "")
         if "cc_slower_statusline" not in existing:
             cmd = f"python3 {FEEDER}"
             if existing:
                 cmd = f"{cmd} -- {existing}"
-            settings["statusLine"] = {"type": "command", "command": cmd}
+            # Update in place so keys like "padding" survive.
+            sl.update({"type": "command", "command": cmd})
+            settings["statusLine"] = sl
 
     config_path = Path(args.config)
     config = build_config(args.cache_ttl)
