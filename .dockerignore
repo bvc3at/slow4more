@@ -1,0 +1,6 @@
+.git
+.github
+.claude
+__pycache__
+.ruff_cache
+.DS_Store
