@@ -74,8 +74,14 @@ python3 install.py --apply    # writes ~/.config/cc-slower/config.json and
 Notes:
 
 - Default `--cache-ttl 3600` matches the 1-hour prompt cache Claude
-  subscriptions get automatically. Use `--cache-ttl 300` for API-key auth
-  (5-minute cache), or if you set `FORCE_PROMPT_CACHING_5M=1`.
+  subscriptions get automatically. Set `--cache-ttl 300` if you're on the
+  5-minute cache instead (API-key auth, or `FORCE_PROMPT_CACHING_5M=1`):
+  the sleep cap derives from the TTL, and a sleep that outlives the cache
+  would *add* cost rather than save it.
+- cc-slower targets subscription accounts. API-key auth has no 5h/7d
+  windows, so the official usage feed never activates there; on API auth
+  the tool is only useful as a *self-imposed* spend pacer — configure
+  transcript `budgets` for the burn rate you're willing to accept.
 - The hook `timeout` in settings is set to `cap + 120 s` automatically so
   Claude Code doesn't kill a legitimate sleep (hook timeouts are
   non-blocking: the tool would still run, you'd just lose the delay).

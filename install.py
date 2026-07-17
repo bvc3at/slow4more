@@ -50,8 +50,11 @@ def main() -> int:
                                        os.path.expanduser("~/.config")),
                         "cc-slower", "config.json"))
     ap.add_argument("--cache-ttl", type=int, default=3600,
-                    help="prompt cache TTL seconds: 3600 for Claude "
-                         "subscription (default), 300 for API-key auth")
+                    help="prompt cache TTL seconds. 3600 = subscription "
+                         "1-hour cache (default); 300 if you are on the "
+                         "5-minute cache (API-key auth or "
+                         "FORCE_PROMPT_CACHING_5M=1) so sleeps can never "
+                         "outlive the cache")
     ap.add_argument("--no-statusline", action="store_true",
                     help="skip statusline integration (hook falls back to "
                          "local transcript accounting)")
