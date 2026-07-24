@@ -203,13 +203,29 @@ class Log:
 # ---------------------------------------------------------------------------
 
 EMPTY_STATE = {
-    "version": 1,
+    "version": 2,
     "sessions": {},        # sid -> {offset, transcript_path, last_sleep_end,
                            #         last_notify, seen_ids: [..], updated}
     "events": {},          # str(minute_epoch) -> weighted tokens
     "windows": {},         # name -> {start, integral, last_error, last_t}
     "oauth_cache": None,   # {fetched, data}
 }
+
+
+def _migrate_state(data: dict) -> dict:
+    """Bring older state files up to the current schema version.
+
+    v1 -> v2: the controller integral used to accumulate the raw pace error;
+    it now accumulates the urgency-weighted error. A carried-over v1 integral
+    is on the old scale and would reintroduce the low-utilization over-throttle,
+    so clear the per-window controller accumulators once on upgrade.
+    """
+    if data.get("version") != 2:
+        for w in data.get("windows", {}).values():
+            w["integral"] = 0.0
+            w["last_error"] = 0.0
+        data["version"] = 2
+    return data
 
 
 class StateFile:
@@ -231,6 +247,7 @@ class StateFile:
                 self.data = json.load(f)
         except (OSError, ValueError):
             self.data = json.loads(json.dumps(EMPTY_STATE))
+        _migrate_state(self.data)
         return self
 
     def __exit__(self, exc_type, exc, tb):

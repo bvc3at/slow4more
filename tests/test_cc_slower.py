@@ -128,6 +128,23 @@ class TestController(unittest.TestCase):
         vals = [cc.urgency(u, a, b, 3.0) for u in (0.6, 0.7, 0.8, 0.9)]
         self.assertEqual(vals, sorted(vals))
 
+    def test_migration_clears_legacy_integral(self):
+        # A state.json carried over from the pre-urgency controller holds an
+        # integral accumulated from the raw pace error. Left in place it makes
+        # the ki term over-throttle at low utilization (the reported
+        # regression); _migrate_state must zero it on upgrade.
+        cfg = make_cfg(cache_ttl_seconds=3600)
+        st = fresh_state()
+        st["version"] = 1
+        st["windows"]["five_hour"] = {
+            "integral": 2000.0, "last_error": 0.1, "last_t": 1000.0}
+        cc._migrate_state(st)
+        self.assertEqual(st["version"], 2)
+        self.assertEqual(st["windows"]["five_hour"]["integral"], 0.0)
+        d = cc.compute_sleep(
+            [cc.WindowSnapshot("five_hour", 0.51, 0.27)], st, cfg, 1000.0)
+        self.assertEqual(d.sleep, 0.0)
+
     def test_moderate_lead_low_util_ignored_but_high_util_throttles(self):
         # The reported regression: a 24-point pace lead at 51% utilization must
         # produce no sleep (plenty of headroom); the identical lead near the
