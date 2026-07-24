@@ -161,7 +161,7 @@ Notes:
 | key | default | meaning |
 |---|---|---|
 | `provider` | `auto` | `auto` = statusline-fed `usage.json` if fresh, else transcripts. Also: `file`, `transcript`, `oauth` |
-| `enforce_windows` | `["five_hour"]` | which usage windows to pace against; add `"seven_day"` to also throttle on the weekly limit |
+| `enforce_windows` | `["five_hour"]` | which usage windows to pace against. Omitting the key uses the default `["five_hour"]`; `["five_hour","seven_day"]` enables both; `[]` disables throttling entirely; `null` selects all known windows |
 | `cache_ttl_seconds` | 300 | prompt cache TTL; sleep cap derives from it |
 | `sleep_cap_fraction` | 0.8 | cap = ttl × fraction |
 | `activation_utilization` | 0.5 | ramp starts here; full speed below it |
