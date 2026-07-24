@@ -36,7 +36,7 @@ def build_config(cache_ttl: int, ramp_exponent: float,
         "provider": "auto",
         "cache_ttl_seconds": cache_ttl,
         "activation_utilization": 0.5,
-        "ramp_exponent": ramp_exponent,
+        "ramp_exponent": ramp_exponent if ramp_exponent is not None else 3.0,
         "enforce_windows": enforce_windows,
     }
 
@@ -58,7 +58,7 @@ def main() -> int:
                          "5-minute cache (API-key auth or "
                          "FORCE_PROMPT_CACHING_5M=1) so sleeps can never "
                          "outlive the cache")
-    ap.add_argument("--ramp-exponent", type=float, default=3.0,
+    ap.add_argument("--ramp-exponent", type=float, default=None,
                     help="convex steepness of the slowdown between activation "
                          "and the hard limit: 1 = linear from activation, "
                          "higher = flatter early and steeper near the limit "
@@ -125,6 +125,13 @@ def main() -> int:
             merged = {}
         merged.update({k: v for k, v in config.items() if k not in merged})
         config = merged
+
+    # User-supplied flags override an existing config; unspecified options keep
+    # whatever the existing config already had.
+    if args.enforce_seven_day:
+        config["enforce_windows"] = ["five_hour", "seven_day"]
+    if args.ramp_exponent is not None:
+        config["ramp_exponent"] = args.ramp_exponent
 
     print(f"== {settings_path} ==")
     print(json.dumps(settings, indent=2))
