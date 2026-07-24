@@ -227,6 +227,8 @@ class TestSimulation(unittest.TestCase):
         self.assertIsNotNone(exhausted_at)
         self.assertGreater(exhausted_at, 3 * 3600,   # >3h vs 1h unthrottled
                            f"exhausted after {exhausted_at/3600:.2f}h")
+        # ...but the cap stops it short of the full window on the 5-min cache.
+        self.assertLess(exhausted_at, cc.WINDOWS["five_hour"])
 
     def test_light_usage_never_throttles(self):
         cfg = make_cfg()
