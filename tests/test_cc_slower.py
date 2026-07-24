@@ -3,7 +3,9 @@
 Run:  python3 -m unittest discover -s tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -17,6 +19,12 @@ spec = importlib.util.spec_from_file_location(
 cc = importlib.util.module_from_spec(spec)
 sys.modules["cc_slower"] = cc
 spec.loader.exec_module(cc)
+
+_inst_spec = importlib.util.spec_from_file_location(
+    "install", ROOT / "install.py")
+install = importlib.util.module_from_spec(_inst_spec)
+sys.modules["install"] = install
+_inst_spec.loader.exec_module(install)
 
 
 def make_cfg(**over):
@@ -440,6 +448,47 @@ class TestHandleEvent(unittest.TestCase):
                               now_fn=lambda: 2_000_000.0)
         self.assertEqual(slept, [])
         self.assertEqual(out, {})
+
+
+class TestInstaller(unittest.TestCase):
+    """install.py writes the enforcement config and re-install honors flags."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.config = os.path.join(self.tmp.name, "config.json")
+        self.settings = os.path.join(self.tmp.name, "settings.json")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, *extra):
+        argv = ["install.py", "--apply", "--no-statusline",
+                "--config", self.config, "--settings", self.settings, *extra]
+        old = sys.argv
+        sys.argv = argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = install.main()
+        finally:
+            sys.argv = old
+        self.assertEqual(rc, 0)
+        with open(self.config) as f:
+            return json.load(f)
+
+    def test_apply_defaults_to_five_hour_only(self):
+        cfg = self._run()
+        self.assertEqual(cfg["enforce_windows"], ["five_hour"])
+
+    def test_enforce_seven_day_flag_writes_both(self):
+        cfg = self._run("--enforce-seven-day")
+        self.assertEqual(cfg["enforce_windows"], ["five_hour", "seven_day"])
+
+    def test_reinstall_opts_into_seven_day(self):
+        first = self._run()
+        self.assertEqual(first["enforce_windows"], ["five_hour"])
+        second = self._run("--enforce-seven-day")
+        self.assertEqual(second["enforce_windows"],
+                         ["five_hour", "seven_day"])
 
 
 if __name__ == "__main__":
