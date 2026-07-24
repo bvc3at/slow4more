@@ -563,7 +563,7 @@ def compute_sleep(snaps: list, st: dict, cfg: dict, now: float) -> Decision:
     integral_cap = cfg["integral_cap_hours"] * 3600.0
     activation = cfg["activation_utilization"]
     hard_limit = cfg["hard_limit_utilization"]
-    exponent = float(cfg.get("ramp_exponent", 1.0))
+    exponent = float(cfg["ramp_exponent"])
     best = Decision(0.0)
 
     for snap in snaps:
