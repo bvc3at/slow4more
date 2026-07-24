@@ -47,6 +47,12 @@ DEFAULT_CONFIG = {
     #   "auto"       - file if fresh, else transcript
     "provider": "auto",
 
+    # Which usage windows to actually pace against, by canonical WINDOWS name.
+    # Default: the 5-hour window only. The 7-day window rarely binds first and
+    # pacing against it would slow every session all week for a limit that
+    # resets weekly; opt in with ["five_hour", "seven_day"] if you want it.
+    "enforce_windows": ["five_hour"],
+
     # Prompt-cache TTL. 300 for the default 5-minute cache, 3600 if your
     # requests use the 1-hour cache. The sleep cap derives from this.
     "cache_ttl_seconds": 300,
@@ -59,6 +65,17 @@ DEFAULT_CONFIG = {
     "activation_utilization": 0.50,
     # At/after this utilization, always sleep the full cap (limp-home mode).
     "hard_limit_utilization": 0.97,
+
+    # Shape of the slowdown between activation and hard_limit. The controller's
+    # authority is scaled by a convex "urgency" weight
+    #   w(u) = ((u - activation) / (hard_limit - activation)) ** ramp_exponent
+    # so a given pace lead earns almost no sleep far below the limit and close
+    # to the full response as utilization approaches it. 1.0 = linear ramp from
+    # activation; >1 stays flatter early and steepens near the top (3.0 keeps
+    # sleeps negligible until ~75-80% even when well ahead of pace). This is
+    # the primary "how aggressive" dial - raise it to slow later, lower it to
+    # slow sooner.
+    "ramp_exponent": 3.0,
 
     # Sleeps shorter than this are skipped (not worth the latency).
     "min_sleep_seconds": 2.0,
@@ -464,14 +481,20 @@ def file_snapshots(cfg: dict, now: float, log: Log, check_age: bool = True) -> l
 def get_snapshots(st: dict, cfg: dict, now: float, log: Log) -> list:
     provider = cfg.get("provider", "auto")
     if provider == "file":
-        return file_snapshots(cfg, now, log, check_age=False)
-    if provider == "oauth":
-        return oauth_snapshots(st, cfg, now, log)
-    if provider == "auto":
-        snaps = file_snapshots(cfg, now, log)
-        if snaps:
-            return snaps
-    return transcript_snapshots(st, cfg, now)
+        snaps = file_snapshots(cfg, now, log, check_age=False)
+    elif provider == "oauth":
+        snaps = oauth_snapshots(st, cfg, now, log)
+    elif provider == "auto":
+        snaps = file_snapshots(cfg, now, log) or transcript_snapshots(st, cfg, now)
+    else:
+        snaps = transcript_snapshots(st, cfg, now)
+    # Enforce only the configured windows (default: 5-hour only). Filtering
+    # here keeps the 7-day window from being considered by any provider unless
+    # the user explicitly opts in.
+    enforce = cfg.get("enforce_windows")
+    if enforce is None:
+        enforce = list(WINDOWS)
+    return [s for s in snaps if s.name in enforce]
 
 
 # ---------------------------------------------------------------------------
@@ -486,16 +509,44 @@ class Decision:
     diag: dict = field(default_factory=dict)
 
 
+def urgency(u: float, activation: float, hard_limit: float,
+            exponent: float) -> float:
+    """Convex ramp in [0, 1] that gates the controller by absolute utilization.
+
+    Returns 0 at/below `activation`, 1 at/above `hard_limit`, and
+    ((u - activation) / (hard_limit - activation)) ** exponent in between. With
+    exponent > 1 the curve is flat early and steep near the limit, so a pace
+    lead only turns into a real sleep as the window nears exhaustion.
+    """
+    if hard_limit <= activation:
+        return 1.0 if u >= hard_limit else 0.0
+    x = (u - activation) / (hard_limit - activation)
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    return x ** exponent
+
+
 def compute_sleep(snaps: list, st: dict, cfg: dict, now: float) -> Decision:
     """PI(D) pace controller, evaluated per window; the neediest window wins.
 
-    error e = utilization - elapsed_fraction. e > 0 means we're burning budget
-    faster than wall time is passing; left unchecked we exhaust the window
-    early. Output is clamped to [0, cache_ttl * sleep_cap_fraction] so the
-    prompt cache never goes cold because of us.
+    The raw pace error is e = utilization - elapsed_fraction (e > 0 means we're
+    burning budget faster than wall time is passing). We don't act on e
+    directly: it is gated by a convex urgency weight w(u) (see urgency()) that
+    is ~0 far below the limit and 1 near it, so the effective error the loop
+    controls is ê = w(u) * max(e, 0). Consequences: the same 24-point pace lead
+    is ignored at 51% utilization and near-maximal at 90%, and the integral -
+    which accumulates ê - only winds up once you are genuinely close, so a
+    short interactive burst that never lifts utilization cannot bank throttle.
+    Output is clamped to [0, cache_ttl * sleep_cap_fraction] so the prompt cache
+    never goes cold because of us.
     """
     cap = cfg["cache_ttl_seconds"] * cfg["sleep_cap_fraction"]
     integral_cap = cfg["integral_cap_hours"] * 3600.0
+    activation = cfg["activation_utilization"]
+    hard_limit = cfg["hard_limit_utilization"]
+    exponent = float(cfg.get("ramp_exponent", 1.0))
     best = Decision(0.0)
 
     for snap in snaps:
@@ -503,27 +554,28 @@ def compute_sleep(snaps: list, st: dict, cfg: dict, now: float) -> Decision:
         last_t = wst.get("last_t", now)
         dt = min(max(now - last_t, 0.0), 600.0)  # stale gaps don't wind up
         e = snap.utilization - snap.elapsed_fraction
-        active = snap.utilization >= cfg["activation_utilization"]
+        w = urgency(snap.utilization, activation, hard_limit, exponent)
+        e_eff = w * e if e > 0 else 0.0  # urgency-weighted, ahead-of-pace only
 
         integral = float(wst.get("integral", 0.0))
-        if active and e > 0:
-            integral = min(integral + e * dt, integral_cap)
+        if e_eff > 0:
+            integral = min(integral + e_eff * dt, integral_cap)
         else:
             tau = float(cfg["integral_decay_tau"])
             integral *= math.exp(-dt / tau) if tau > 0 else 0.0
 
         deriv = 0.0
         if dt > 0 and cfg["kd"]:
-            deriv = (e - float(wst.get("last_error", e))) / dt
+            deriv = (e_eff - float(wst.get("last_error", e_eff))) / dt
 
-        wst.update(integral=integral, last_error=e, last_t=now)
+        wst.update(integral=integral, last_error=e_eff, last_t=now)
 
-        if snap.utilization >= cfg["hard_limit_utilization"]:
+        if snap.utilization >= hard_limit:
             out, why = cap, "hard-limit"
-        elif not active:
+        elif e_eff <= 0:
             continue
         else:
-            out = (cfg["kp"] * e
+            out = (cfg["kp"] * e_eff
                    + cfg["ki"] * (integral / 3600.0)
                    + cfg["kd"] * deriv)
             why = "pid"
@@ -533,6 +585,7 @@ def compute_sleep(snaps: list, st: dict, cfg: dict, now: float) -> Decision:
                 "u": round(snap.utilization, 4),
                 "elapsed": round(snap.elapsed_fraction, 4),
                 "e": round(e, 4),
+                "w": round(w, 4),
                 "integral_h": round(integral / 3600.0, 4),
             })
 

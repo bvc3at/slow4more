@@ -11,16 +11,19 @@ throttling saves).
 
 ## How it works
 
-```
-statusline feeder ──writes──▶ usage.json (official rate_limits %)
-                                   │
-tool call ──▶ PreToolUse hook ─────┤
-                │                  ▼
-                │        PI controller per window:
-                │        error = utilization − elapsed_fraction
-                │        sleep = clamp(Kp·e + Ki·∫e, 0, cache_ttl · 0.8)
-                ▼
-        sleep, then let the tool run (cache stays warm)
+```mermaid
+flowchart TD
+    T[tool call] --> H[PreToolUse hook]
+    SL[statusline feeder] -->|writes usage.json| H
+    H --> S{"fresh usage.json?"}
+    S -->|yes| U1["official rate_limits: u, elapsed"]
+    S -->|no| U2["weighted tokens vs budgets"]
+    U1 --> E["pace error: e = u - elapsed"]
+    U2 --> E
+    E --> W["urgency: w = ((u-a)/(b-a))^gamma"]
+    W --> EE["effective error: e_hat = w * max(e, 0)"]
+    EE --> C["sleep = clamp(Kp*e_hat + Ki*integral, 0, cache_ttl*0.8)"]
+    C --> RUN["sleep, then run the tool (cache stays warm)"]
 ```
 
 - **Usage source (primary):** Claude Code passes official `rate_limits`
@@ -32,34 +35,97 @@ tool call ──▶ PreToolUse hook ─────┤
   budgets (works offline, needs calibration; transcript format is not a
   stable interface, so this is best-effort).
 - **Controller:** one PI regulator per window, the neediest window wins.
-  The pace error is `utilization − elapsed_fraction of the window`: positive
-  means "at this rate the budget dies before the window does". The integral
-  term (with anti-windup clamp and decay) supplies the steady-state sleep a
-  pure proportional term can't; the derivative gain exists but defaults to 0
-  because utilization is a coarse, step-like signal and D just amplifies
+  The pace error `utilization − elapsed_fraction of the window` is gated by a
+  convex **urgency weight** `w(u)` (≈0 far from the limit, 1 near it) before it
+  drives the loop, so throttling ramps in with *proximity to the cap* rather
+  than with raw pace — a lead you can easily afford at 51% costs nothing, the
+  same lead at 90% costs almost the full cap (see [The math](#the-math)). The
+  integral term (with anti-windup clamp and decay) supplies the steady-state
+  sleep a pure proportional term can't; the derivative gain exists but defaults
+  to 0 because utilization is a coarse, step-like signal and D just amplifies
   noise.
 - **State** (controller integrals, window anchors, token accounting, sleep
   dedupe) lives in one flock-protected JSON file, so multiple concurrent
   sessions share the picture and throttle together.
 
+### The math
+
+Per window, on every `PreToolUse`:
+
+```
+e     = utilization − elapsed_fraction         # pace error; e > 0 ⇒ ahead of pace
+w(u)  = clamp((u − a) / (b − a), 0, 1) ** γ     # urgency: 0 at a, 1 at b, convex for γ > 1
+ê     = w(u) · max(e, 0)                        # effective (urgency-weighted) error
+sleep = clamp(Kp·ê + Ki·∫ê dt, 0, cache_ttl · sleep_cap_fraction)
+```
+
+with `a = activation_utilization` (0.50), `b = hard_limit_utilization` (0.97),
+`γ = ramp_exponent` (3.0), `Kp = 900`, `Ki = 400/h`. The neediest window wins,
+and at `u ≥ b` the sleep is pinned to the cap (limp-home).
+
+A pace **lead only matters when the budget is actually running low**. Being
+ahead of pace early — say 51% used with 27% of the window elapsed — usually
+self-corrects, because interactive sessions burst and then idle, so `w(u)`
+keeps cc-slower out of the way until utilization climbs toward the limit, where
+the ramp turns steep. The *same* 24-point lead earns **0 s** at 51% and a
+near-cap sleep at 90%.
+
+#### Racing the window: utilization vs. elapsed
+
+The pace error `e` is the vertical gap between budget spent (bars) and window
+elapsed (line). Bars above the line mean you're ahead of pace; cc-slower only
+leans in as the bars climb into the top-right corner.
+
+```mermaid
+xychart-beta
+    title "Utilization (bars) vs. on-pace line over a 5h window"
+    x-axis "hours into window" [0, 1, 2, 3, 4, 5]
+    y-axis "fraction consumed" 0 --> 1
+    bar [0, 0.30, 0.52, 0.70, 0.85, 0.97]
+    line [0, 0.20, 0.40, 0.60, 0.80, 1.00]
+```
+
+#### The sleep curve: convex in utilization
+
+Sleep per tool for a fixed ~30-point pace lead at `γ = 3` (5-minute-cache cap
+of 240 s shown). The curve stays near zero until ~70% utilization and only
+approaches the cap near the hard limit — where the old controller instead
+jumped straight to the cap the moment you crossed 50%.
+
+```mermaid
+xychart-beta
+    title "Sleep per tool vs. utilization (fixed pace lead, gamma = 3)"
+    x-axis "utilization %" [50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 97]
+    y-axis "sleep seconds (240s cap)" 0 --> 240
+    line [0, 0, 3, 9, 21, 41, 70, 112, 166, 237, 240]
+```
+
 ### The rules it enforces
 
-1. **No throttle below 50% utilization** (`activation_utilization`) — full
-   speed while you have headroom.
+1. **Convex ramp, not a cliff** — full speed below `activation_utilization`
+   (0.50); above it the sleep scales with `w(u) = ((u − a)/(b − a))^γ` (see
+   `ramp_exponent`), so a pace lead is nearly free while you have headroom and
+   only bites as utilization nears the limit.
 2. **Never sleep past the cache TTL** — sleeps are capped at
    `cache_ttl_seconds × sleep_cap_fraction` (default 0.8). Even at 100%
    utilization it "limps" at the cap rather than pausing outright, keeping
    the cache warm until the window resets.
-3. **Both windows count** — each is paced independently; the larger required
-   sleep wins.
+3. **5-hour window by default** — only the 5-hour window is paced. Opt into the
+   weekly window with `enforce_windows: ["five_hour", "seven_day"]` (or
+   `--enforce-seven-day` at install); when both are on, each is paced
+   independently and the larger required sleep wins.
 4. **One sleep per API round-trip** — parallel tool calls in one assistant
    turn are deduped via shared state (`min_interval_seconds`).
 5. **Fail-open** — any error (bad state, missing usage data, network) logs
    and lets the tool run immediately. The hook can never block your session.
 
-Simulation result (defaults, 5-min cache): a workload that would burn a full
-5-hour budget in 1 hour is stretched to 5.15 h, with zero throttling below
-50% utilization and no sleep ever exceeding the 240 s cap.
+Simulation result: a workload that would burn a full 5-hour budget in 1 hour
+(5× pace) is stretched **past the window — to ~8.9 h on the subscription
+1-hour cache** (the installer default), while a session merely ahead of pace at
+51% utilization is left completely alone (0 s) and no sleep ever exceeds the
+cache-TTL cap. On the smaller 5-minute cache the 240 s cap limits how far a
+heavy burn can stretch at `γ = 3` (to ~3.8 h); lower `ramp_exponent` or
+`activation_utilization` there if you rely on filling the whole window.
 
 ## Install
 
@@ -95,10 +161,12 @@ Notes:
 | key | default | meaning |
 |---|---|---|
 | `provider` | `auto` | `auto` = statusline-fed `usage.json` if fresh, else transcripts. Also: `file`, `transcript`, `oauth` |
+| `enforce_windows` | `["five_hour"]` | which usage windows to pace against; add `"seven_day"` to also throttle on the weekly limit |
 | `cache_ttl_seconds` | 300 | prompt cache TTL; sleep cap derives from it |
 | `sleep_cap_fraction` | 0.8 | cap = ttl × fraction |
-| `activation_utilization` | 0.5 | no throttling below this |
-| `hard_limit_utilization` | 0.97 | at/above: always sleep the full cap |
+| `activation_utilization` | 0.5 | ramp starts here; full speed below it |
+| `hard_limit_utilization` | 0.97 | ramp reaches full authority; at/above, always sleep the cap |
+| `ramp_exponent` | 3.0 | convex steepness from activation→hard limit (1 = linear, higher = later onset); primary "how aggressive" dial |
 | `kp`, `ki`, `kd` | 900 / 400 / 0 | controller gains (see source) |
 | `budgets` | placeholders | weighted-token budgets per window (transcript fallback only — calibrate!) |
 | `weights` | in 1, out 5, cw 1.25, cr 0.1 | weighted-token cost model |

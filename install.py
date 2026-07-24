@@ -30,11 +30,14 @@ HOOK = REPO / "hooks" / "cc_slower.py"
 FEEDER = REPO / "hooks" / "cc_slower_statusline.py"
 
 
-def build_config(cache_ttl: int) -> dict:
+def build_config(cache_ttl: int, ramp_exponent: float,
+                 enforce_windows: list) -> dict:
     return {
         "provider": "auto",
         "cache_ttl_seconds": cache_ttl,
         "activation_utilization": 0.5,
+        "ramp_exponent": ramp_exponent,
+        "enforce_windows": enforce_windows,
     }
 
 
@@ -55,6 +58,16 @@ def main() -> int:
                          "5-minute cache (API-key auth or "
                          "FORCE_PROMPT_CACHING_5M=1) so sleeps can never "
                          "outlive the cache")
+    ap.add_argument("--ramp-exponent", type=float, default=3.0,
+                    help="convex steepness of the slowdown between activation "
+                         "and the hard limit: 1 = linear from activation, "
+                         "higher = flatter early and steeper near the limit "
+                         "(default 3). Lower it (or activation) if you are on "
+                         "the 5-minute cache and rely on stretching heavy "
+                         "burns across the whole window")
+    ap.add_argument("--enforce-seven-day", action="store_true",
+                    help="also pace against the 7-day window (default: only "
+                         "the 5-hour window is enforced)")
     ap.add_argument("--no-statusline", action="store_true",
                     help="skip statusline integration (hook falls back to "
                          "local transcript accounting)")
@@ -102,7 +115,9 @@ def main() -> int:
             settings["statusLine"] = sl
 
     config_path = Path(args.config)
-    config = build_config(args.cache_ttl)
+    windows = (["five_hour", "seven_day"] if args.enforce_seven_day
+               else ["five_hour"])
+    config = build_config(args.cache_ttl, args.ramp_exponent, windows)
     if config_path.exists():
         try:
             merged = json.loads(config_path.read_text())

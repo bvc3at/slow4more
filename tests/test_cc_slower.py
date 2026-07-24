@@ -105,6 +105,8 @@ class TestController(unittest.TestCase):
         self.assertEqual(d.sleep, 0.0)
 
     def test_neediest_window_wins(self):
+        # compute_sleep paces every window it is handed; which windows reach it
+        # is decided upstream by get_snapshots (see TestWindowSelection).
         cfg, st = make_cfg(), fresh_state()
         d = cc.compute_sleep([
             cc.WindowSnapshot("five_hour", 0.55, 0.50),
@@ -112,6 +114,33 @@ class TestController(unittest.TestCase):
         ], st, cfg, 1000.0)
         self.assertEqual(d.window, "seven_day")
         self.assertGreater(d.sleep, 0)
+
+    def test_urgency_ramp_is_convex(self):
+        a, b = 0.5, 0.97
+        self.assertEqual(cc.urgency(0.49, a, b, 3.0), 0.0)
+        self.assertEqual(cc.urgency(0.50, a, b, 3.0), 0.0)   # 0 at activation
+        self.assertEqual(cc.urgency(0.97, a, b, 3.0), 1.0)   # 1 at hard limit
+        self.assertEqual(cc.urgency(1.20, a, b, 3.0), 1.0)   # clamped above
+        # Convex: the midpoint sits well below the linear 0.5.
+        self.assertLess(cc.urgency((a + b) / 2, a, b, 3.0), 0.5)
+        self.assertAlmostEqual(cc.urgency((a + b) / 2, a, b, 1.0), 0.5)
+        # Monotone increasing in utilization.
+        vals = [cc.urgency(u, a, b, 3.0) for u in (0.6, 0.7, 0.8, 0.9)]
+        self.assertEqual(vals, sorted(vals))
+
+    def test_moderate_lead_low_util_ignored_but_high_util_throttles(self):
+        # The reported regression: a 24-point pace lead at 51% utilization must
+        # produce no sleep (plenty of headroom); the identical lead near the
+        # limit must throttle hard.
+        cfg = make_cfg(cache_ttl_seconds=3600)
+        low = cc.compute_sleep(
+            [cc.WindowSnapshot("five_hour", 0.51, 0.27)], fresh_state(),
+            cfg, 1000.0)
+        self.assertEqual(low.sleep, 0.0)
+        high = cc.compute_sleep(
+            [cc.WindowSnapshot("five_hour", 0.90, 0.66)], fresh_state(),
+            cfg, 1000.0)
+        self.assertGreater(high.sleep, 100.0)
 
 
 class TestSimulation(unittest.TestCase):
@@ -137,9 +166,12 @@ class TestSimulation(unittest.TestCase):
                 break
         return exhausted_at, sleeps
 
-    def test_heavy_burn_stretched_to_window(self):
-        # Unthrottled this workload exhausts a 5h budget in ~1h.
-        cfg = make_cfg()
+    def test_heavy_burn_stretched_past_window_on_1h_cache(self):
+        # Unthrottled this workload exhausts a 5h budget in ~1h (5x pace). On
+        # the subscription 1-hour cache (the installer default) the large sleep
+        # cap lets the convex ramp stretch it comfortably past the window even
+        # though throttling only ramps in near the top.
+        cfg = make_cfg(cache_ttl_seconds=3600)
         window = cc.WINDOWS["five_hour"]
         budget = 1_000_000.0
         cycles_unthrottled = 3600 / 20.0
@@ -148,11 +180,28 @@ class TestSimulation(unittest.TestCase):
         cap = cfg["cache_ttl_seconds"] * cfg["sleep_cap_fraction"]
         self.assertTrue(all(s <= cap + 1e-9 for s in sleeps))
         self.assertIsNotNone(exhausted_at)
-        # Budget must last at least ~90% of the window instead of 20%.
-        self.assertGreater(exhausted_at, 0.9 * window,
+        # Budget outlasts the whole window instead of dying at ~20% of it.
+        self.assertGreater(exhausted_at, window,
                            f"exhausted after {exhausted_at/3600:.2f}h")
         # ...but the controller must not crawl forever either.
         self.assertLess(exhausted_at, 2.5 * window)
+
+    def test_heavy_burn_5min_cache_delays_but_cap_limits_stretch(self):
+        # With the 5-minute cache the cap is only 240s, so at the default
+        # exponent a 5x burn cannot be stretched all the way across the window:
+        # it is still delayed to several times its unthrottled 1h life, but
+        # exhausts before the window closes. This pins the cap/exponent
+        # tradeoff documented in the README (lower ramp_exponent or
+        # activation_utilization if you are on the 5-minute cache).
+        cfg = make_cfg(cache_ttl_seconds=300)
+        budget = 1_000_000.0
+        w = budget / (3600 / 20.0)
+        exhausted_at, sleeps = self.run_sim(budget, w, 20.0, cfg)
+        cap = cfg["cache_ttl_seconds"] * cfg["sleep_cap_fraction"]
+        self.assertTrue(all(s <= cap + 1e-9 for s in sleeps))
+        self.assertIsNotNone(exhausted_at)
+        self.assertGreater(exhausted_at, 3 * 3600,   # >3h vs 1h unthrottled
+                           f"exhausted after {exhausted_at/3600:.2f}h")
 
     def test_light_usage_never_throttles(self):
         cfg = make_cfg()
@@ -235,6 +284,48 @@ class TestIngest(unittest.TestCase):
         self.assertAlmostEqual(sum(st["events"].values()),
                                2 * (100 * 1.0 + 10 * 5.0))
         os.unlink(path)
+
+
+class TestWindowSelection(unittest.TestCase):
+    """get_snapshots enforces only the configured windows (default: 5h)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["CC_SLOWER_STATE_DIR"] = self.tmp.name
+        self.now = 2_000_000.0
+        self.usage = os.path.join(self.tmp.name, "usage.json")
+        with open(self.usage, "w") as f:
+            json.dump({
+                "five_hour": {"utilization": 0.55,
+                              "resets_at": self.now + 0.5 * cc.WINDOWS["five_hour"]},
+                "seven_day": {"utilization": 0.80,
+                              "resets_at": self.now + 0.5 * cc.WINDOWS["seven_day"]},
+            }, f)
+
+    def tearDown(self):
+        os.environ.pop("CC_SLOWER_STATE_DIR", None)
+        self.tmp.cleanup()
+
+    def _names(self, cfg):
+        log = cc.Log(make_cfg(log_level="off"))
+        snaps = cc.get_snapshots(fresh_state(), cfg, self.now, log)
+        return sorted(s.name for s in snaps)
+
+    def test_default_enforces_five_hour_only(self):
+        # Both windows are present in the feed; only 5h survives by default,
+        # even though 7d is the neediest.
+        cfg = make_cfg(provider="file", usage_file=self.usage)
+        self.assertEqual(self._names(cfg), ["five_hour"])
+
+    def test_opt_in_seven_day(self):
+        cfg = make_cfg(provider="file", usage_file=self.usage,
+                       enforce_windows=["five_hour", "seven_day"])
+        self.assertEqual(self._names(cfg), ["five_hour", "seven_day"])
+
+    def test_empty_enforce_list_disables_all(self):
+        cfg = make_cfg(provider="file", usage_file=self.usage,
+                       enforce_windows=[])
+        self.assertEqual(self._names(cfg), [])
 
 
 class TestHandleEvent(unittest.TestCase):
