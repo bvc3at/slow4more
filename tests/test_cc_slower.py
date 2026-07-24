@@ -354,6 +354,13 @@ class TestWindowSelection(unittest.TestCase):
                        enforce_windows=[])
         self.assertEqual(self._names(cfg), [])
 
+    def test_null_enforce_falls_back_to_all_windows(self):
+        # Distinct from the empty list: null means "no explicit selection", so
+        # every known window is enforced.
+        cfg = make_cfg(provider="file", usage_file=self.usage,
+                       enforce_windows=None)
+        self.assertEqual(self._names(cfg), ["five_hour", "seven_day"])
+
 
 class TestHandleEvent(unittest.TestCase):
     def setUp(self):
