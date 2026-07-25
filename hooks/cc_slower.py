@@ -77,6 +77,17 @@ DEFAULT_CONFIG = {
     # slow sooner.
     "ramp_exponent": 3.0,
 
+    # How sharply the per-tool sleep climbs to the cap as utilization nears the
+    # hard limit. The PI gains produce sleeps sized for a ~240s cap, so on a
+    # larger cap (e.g. the 1-hour cache's 2880s) the PI response tops out far
+    # below the cap and would only reach it as a discontinuous jump at the hard
+    # limit. The term `cap * w(u) ** cap_approach_exponent` closes that gap
+    # smoothly; the high exponent keeps it negligible until ~90% so sub-limit
+    # pacing stays gentle. Raise it to confine the climb closer to the limit,
+    # lower it to start climbing sooner. (On a <=240s cap the PI term already
+    # dominates, so this is a no-op there.)
+    "cap_approach_exponent": 6.0,
+
     # Sleeps shorter than this are skipped (not worth the latency).
     "min_sleep_seconds": 2.0,
     # Within one session, at most one sleep per this many seconds. Parallel
@@ -564,6 +575,7 @@ def compute_sleep(snaps: list, st: dict, cfg: dict, now: float) -> Decision:
     activation = cfg["activation_utilization"]
     hard_limit = cfg["hard_limit_utilization"]
     exponent = float(cfg["ramp_exponent"])
+    cap_approach = float(cfg["cap_approach_exponent"])
     best = Decision(0.0)
 
     for snap in snaps:
@@ -592,9 +604,13 @@ def compute_sleep(snaps: list, st: dict, cfg: dict, now: float) -> Decision:
         elif e_eff <= 0:
             continue
         else:
-            out = (cfg["kp"] * e_eff
+            pid = (cfg["kp"] * e_eff
                    + cfg["ki"] * (integral / 3600.0)
                    + cfg["kd"] * deriv)
+            # Approach the cap smoothly near the limit instead of letting a
+            # large cap be reached only as a jump at hard_limit; negligible
+            # below ~90% (see cap_approach_exponent).
+            out = max(pid, cap * w ** cap_approach)
             why = "pid"
         out = min(max(out, 0.0), cap)
         if out > best.sleep:

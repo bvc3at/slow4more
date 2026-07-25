@@ -22,7 +22,7 @@ flowchart TD
     U2 --> E
     E --> W["urgency: w = ((u-a)/(b-a))^gamma"]
     W --> EE["effective error: e_hat = w * max(e, 0)"]
-    EE --> C["sleep = clamp(Kp*e_hat + Ki*integral, 0, cache_ttl*0.8)"]
+    EE --> C["sleep = clamp(max(Kp*e_hat + Ki*integral, cap*w^k), 0, cap)"]
     C --> RUN["sleep, then run the tool (cache stays warm)"]
 ```
 
@@ -56,12 +56,17 @@ Per window, on every `PreToolUse`:
 e     = utilization − elapsed_fraction         # pace error; e > 0 ⇒ ahead of pace
 w(u)  = clamp((u − a) / (b − a), 0, 1) ** γ     # urgency: 0 at a, 1 at b, convex for γ > 1
 ê     = w(u) · max(e, 0)                        # effective (urgency-weighted) error
-sleep = clamp(Kp·ê + Ki·∫ê dt, 0, cache_ttl · sleep_cap_fraction)
+pid   = Kp·ê + Ki·∫ê dt                          # pacing response (sized for a ~240s cap)
+sleep = clamp(max(pid, cap · w(u)^κ), 0, cap)   # cap = cache_ttl · sleep_cap_fraction
 ```
 
 with `a = activation_utilization` (0.50), `b = hard_limit_utilization` (0.97),
-`γ = ramp_exponent` (3.0), `Kp = 900`, `Ki = 400/h`. The neediest window wins,
-and at `u ≥ b` the sleep is pinned to the cap (limp-home).
+`γ = ramp_exponent` (3.0), `κ = cap_approach_exponent` (6.0), `Kp = 900`,
+`Ki = 400/h`. The neediest window wins, and at `u ≥ b` the sleep is pinned to
+the cap (limp-home). The `cap · w(u)^κ` term only bites when the cap is large
+(e.g. the 1-hour cache's 2880 s): it lets the sleep climb smoothly to the cap in
+the last few percent before the limit instead of jumping there. On the 5-minute
+cache the pacing term already reaches the cap, so it changes nothing.
 
 A pace **lead only matters when the budget is actually running low**. Being
 ahead of pace early — say 51% used with 27% of the window elapsed — usually
@@ -120,7 +125,7 @@ xychart-beta
    and lets the tool run immediately. The hook can never block your session.
 
 Simulation result: a workload that would burn a full 5-hour budget in 1 hour
-(5× pace) is stretched **past the window — to ~8.9 h on the subscription
+(5× pace) is stretched **past the window — to ~9.7 h on the subscription
 1-hour cache** (the installer default), while a session merely ahead of pace at
 51% utilization is left completely alone (0 s) and no sleep ever exceeds the
 cache-TTL cap. On the smaller 5-minute cache the 240 s cap limits how far a

@@ -167,6 +167,30 @@ class TestController(unittest.TestCase):
             cfg, 1000.0)
         self.assertGreater(high.sleep, 100.0)
 
+    def test_cap_approach_ramps_to_cap_on_large_cache(self):
+        # On a large cap (1h cache -> 2880s) the sleep must climb smoothly to
+        # the cap near the limit instead of topping out far below it and jumping
+        # only at the hard limit. The mid-range stays gentle, and the 5-minute
+        # cap is unaffected (the PI term already dominates there).
+        big = make_cfg(cache_ttl_seconds=3600)
+        cap = big["cache_ttl_seconds"] * big["sleep_cap_fraction"]
+
+        def sleep_at(cfg, u, e=0.30):
+            return cc.compute_sleep(
+                [cc.WindowSnapshot("five_hour", u, max(0.0, u - e))],
+                fresh_state(), cfg, 1000.0).sleep
+
+        mid = sleep_at(big, 0.85)
+        near = sleep_at(big, 0.95)
+        self.assertLess(mid, 0.2 * cap)       # gentle in the mid-range
+        self.assertGreater(near, 0.4 * cap)   # climbs toward the cap near limit
+        self.assertLess(near, cap)            # but not the full cap yet
+        self.assertGreater(near, mid)
+        # The approach term is a no-op on the 5-minute cap: same mid-range sleep
+        # as the pure PI response, and cache-independent.
+        self.assertAlmostEqual(
+            sleep_at(make_cfg(cache_ttl_seconds=300), 0.85), mid, delta=0.5)
+
 
 class TestSimulation(unittest.TestCase):
     """Closed-loop: a synthetic agent burns budget; the controller throttles."""
