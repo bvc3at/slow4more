@@ -30,17 +30,6 @@ HOOK = REPO / "hooks" / "cc_slower.py"
 FEEDER = REPO / "hooks" / "cc_slower_statusline.py"
 
 
-def build_config(cache_ttl: int, ramp_exponent: float,
-                 enforce_windows: list) -> dict:
-    return {
-        "provider": "auto",
-        "cache_ttl_seconds": cache_ttl,
-        "activation_utilization": 0.5,
-        "ramp_exponent": ramp_exponent if ramp_exponent is not None else 3.0,
-        "enforce_windows": enforce_windows,
-    }
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -115,9 +104,15 @@ def main() -> int:
             settings["statusLine"] = sl
 
     config_path = Path(args.config)
-    windows = (["five_hour", "seven_day"] if args.enforce_seven_day
-               else ["five_hour"])
-    config = build_config(args.cache_ttl, args.ramp_exponent, windows)
+    config = {
+        "provider": "auto",
+        "cache_ttl_seconds": args.cache_ttl,
+        "activation_utilization": 0.5,
+        "ramp_exponent": args.ramp_exponent if args.ramp_exponent is not None
+        else 3.0,
+        "enforce_windows": (["five_hour", "seven_day"] if args.enforce_seven_day
+                            else ["five_hour"]),
+    }
     if config_path.exists():
         try:
             merged = json.loads(config_path.read_text())
