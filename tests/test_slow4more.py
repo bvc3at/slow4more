@@ -1,4 +1,4 @@
-"""Unit + closed-loop simulation tests for cc_slower. Stdlib only.
+"""Unit + closed-loop simulation tests for slow4more. Stdlib only.
 
 Run:  python3 -m unittest discover -s tests -v
 """
@@ -15,9 +15,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location(
-    "cc_slower", ROOT / "hooks" / "cc_slower.py")
+    "slow4more", ROOT / "hooks" / "slow4more.py")
 cc = importlib.util.module_from_spec(spec)
-sys.modules["cc_slower"] = cc
+sys.modules["slow4more"] = cc
 spec.loader.exec_module(cc)
 
 _inst_spec = importlib.util.spec_from_file_location(
@@ -342,7 +342,7 @@ class TestWindowSelection(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        os.environ["CC_SLOWER_STATE_DIR"] = self.tmp.name
+        os.environ["SLOW4MORE_STATE_DIR"] = self.tmp.name
         self.now = 2_000_000.0
         self.usage = os.path.join(self.tmp.name, "usage.json")
         with open(self.usage, "w") as f:
@@ -354,7 +354,7 @@ class TestWindowSelection(unittest.TestCase):
             }, f)
 
     def tearDown(self):
-        os.environ.pop("CC_SLOWER_STATE_DIR", None)
+        os.environ.pop("SLOW4MORE_STATE_DIR", None)
         self.tmp.cleanup()
 
     def _names(self, cfg):
@@ -389,20 +389,20 @@ class TestWindowSelection(unittest.TestCase):
 class TestHandleEvent(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        os.environ["CC_SLOWER_STATE_DIR"] = self.tmp.name
-        os.environ["CC_SLOWER_CONFIG"] = os.path.join(
+        os.environ["SLOW4MORE_STATE_DIR"] = self.tmp.name
+        os.environ["SLOW4MORE_CONFIG"] = os.path.join(
             self.tmp.name, "config.json")
         usage = os.path.join(self.tmp.name, "usage.json")
         with open(usage, "w") as f:
             json.dump({"five_hour": {"utilization": 0.8,
                                      "resets_at": 2_000_000 + 10800}}, f)
-        with open(os.environ["CC_SLOWER_CONFIG"], "w") as f:
+        with open(os.environ["SLOW4MORE_CONFIG"], "w") as f:
             json.dump({"provider": "file", "usage_file": usage,
                        "log_level": "off"}, f)
 
     def tearDown(self):
-        os.environ.pop("CC_SLOWER_STATE_DIR", None)
-        os.environ.pop("CC_SLOWER_CONFIG", None)
+        os.environ.pop("SLOW4MORE_STATE_DIR", None)
+        os.environ.pop("SLOW4MORE_CONFIG", None)
         self.tmp.cleanup()
 
     def _event(self, hook="PreToolUse"):

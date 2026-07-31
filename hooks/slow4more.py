@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""cc-slower: a Claude Code hook that adaptively slows sessions down to stay
+"""slow4more: a Claude Code hook that adaptively slows sessions down to stay
 inside the 5-hour / 7-day usage windows WITHOUT letting the prompt cache expire.
 
 Design in one paragraph:
@@ -124,10 +124,10 @@ DEFAULT_CONFIG = {
     },
 
     # oauth provider settings. The token is read from token_env or token_file;
-    # cc-slower never touches ~/.claude credentials on its own.
+    # slow4more never touches ~/.claude credentials on its own.
     "oauth": {
         "url": "https://api.anthropic.com/api/oauth/usage",
-        "token_env": "CC_SLOWER_OAUTH_TOKEN",
+        "token_env": "SLOW4MORE_OAUTH_TOKEN",
         "token_file": None,
         "cache_seconds": 60,
         "timeout_seconds": 5,
@@ -149,20 +149,20 @@ DEFAULT_CONFIG = {
 
 
 def state_dir() -> Path:
-    d = os.environ.get("CC_SLOWER_STATE_DIR")
+    d = os.environ.get("SLOW4MORE_STATE_DIR")
     if d:
         return Path(d)
     xdg = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
-    return Path(xdg) / "cc-slower"
+    return Path(xdg) / "slow4more"
 
 
 def load_config() -> dict:
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
     path = os.environ.get(
-        "CC_SLOWER_CONFIG",
+        "SLOW4MORE_CONFIG",
         os.path.join(
             os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
-            "cc-slower", "config.json",
+            "slow4more", "config.json",
         ),
     )
     try:
@@ -189,7 +189,7 @@ _LOG_LEVELS = {"debug": 10, "info": 20, "off": 100}
 class Log:
     def __init__(self, cfg: dict):
         self.level = _LOG_LEVELS.get(cfg.get("log_level", "info"), 20)
-        self.path = state_dir() / "cc-slower.log"
+        self.path = state_dir() / "slow4more.log"
 
     def _write(self, lvl: str, msg: str) -> None:
         if _LOG_LEVELS[lvl] < self.level:
@@ -689,7 +689,7 @@ def handle_event(event: dict, cfg: dict, log: Log,
         if notify:
             d = planned.diag
             return {"systemMessage": (
-                f"cc-slower: throttling ~{planned.sleep:.0f}s/tool "
+                f"slow4more: throttling ~{planned.sleep:.0f}s/tool "
                 f"({planned.window} window {d.get('u', 0) * 100:.0f}% used, "
                 f"{d.get('elapsed', 0) * 100:.0f}% elapsed) to protect your "
                 f"usage limit without dropping the prompt cache."

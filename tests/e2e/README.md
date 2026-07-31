@@ -1,6 +1,6 @@
 # End-to-end test harness
 
-cc-slower's whole job is timing: insert sleeps between a *real* Claude Code
+slow4more's whole job is timing: insert sleeps between a *real* Claude Code
 process's tool calls, based on live usage numbers. Unit tests cover the
 controller math; only a real Claude Code binary firing real `PreToolUse`
 hooks can prove the integration works. This directory is that proof, sealed
@@ -13,7 +13,7 @@ docker container (--network none)
 │    │                    API, scripts 6 Bash rounds,    │
 │    │ PreToolUse         timestamps every request to    │
 │    ▼                    requests.jsonl)                │
-│ cc_slower.py hook                                      │
+│ slow4more.py hook                                      │
 │    reads /work/usage.json (written per phase)          │
 │    sleeps before each tool call when utilization high  │
 └────────────────────────────────────────────────────────┘
@@ -25,8 +25,8 @@ docker container (--network none)
 From the repo root:
 
 ```bash
-docker build -f tests/e2e/Dockerfile -t cc-slower-test .
-docker run --rm --network none cc-slower-test
+docker build -f tests/e2e/Dockerfile -t slow4more-test .
+docker run --rm --network none slow4more-test
 ```
 
 Exit code 0 and `E2E RESULT: PASS` on the last line means success. The run

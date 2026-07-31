@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""cc-slower statusline feeder.
+"""slow4more statusline feeder.
 
 Claude Code invokes the configured statusline command with a JSON payload on
 stdin that (for Pro/Max subscribers) includes official `rate_limits` data for
 the 5-hour and 7-day windows. This script:
 
-  1. writes that data to <state_dir>/usage.json (atomic) where the cc_slower
+  1. writes that data to <state_dir>/usage.json (atomic) where the slow4more
      hook picks it up as its primary usage source, and
   2. prints a status line. If you already have a statusline command, pass it
-     as arguments (e.g. `cc_slower_statusline.py -- ~/bin/my_statusline.sh`)
+     as arguments (e.g. `slow4more_statusline.py -- ~/bin/my_statusline.sh`)
      and it will be exec'd with the same stdin after the usage file is
      written; otherwise a compact default line is printed.
 
@@ -24,11 +24,11 @@ from pathlib import Path
 
 
 def state_dir() -> Path:
-    d = os.environ.get("CC_SLOWER_STATE_DIR")
+    d = os.environ.get("SLOW4MORE_STATE_DIR")
     if d:
         return Path(d)
     xdg = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
-    return Path(xdg) / "cc-slower"
+    return Path(xdg) / "slow4more"
 
 
 def main() -> int:
@@ -95,5 +95,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception:  # noqa: BLE001 - statusline must never crash
-        print("cc-slower statusline error")
+        print("slow4more statusline error")
         sys.exit(0)

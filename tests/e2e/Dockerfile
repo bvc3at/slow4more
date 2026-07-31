@@ -1,6 +1,6 @@
-# E2E test image for cc-slower: isolated Claude Code + stub Anthropic API.
-# Build from the repo root:  docker build -f tests/e2e/Dockerfile -t cc-slower-test .
-# Run (no network needed):   docker run --rm --network none cc-slower-test
+# E2E test image for slow4more: isolated Claude Code + stub Anthropic API.
+# Build from the repo root:  docker build -f tests/e2e/Dockerfile -t slow4more-test .
+# Run (no network needed):   docker run --rm --network none slow4more-test
 FROM node:22-slim
 
 RUN apt-get update \

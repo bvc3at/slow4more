@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Anthropic Messages API stub for cc-slower end-to-end tests (see README.md
+"""Anthropic Messages API stub for slow4more end-to-end tests (see README.md
 in this directory).
 
 Speaks just enough of the streaming protocol to drive Claude Code through a

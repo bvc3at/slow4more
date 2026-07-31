@@ -4,8 +4,8 @@
 set -uo pipefail
 
 export HOME=/work/home
-export CC_SLOWER_STATE_DIR=/work/state
-export CC_SLOWER_CONFIG=/work/cc-slower-config.json
+export SLOW4MORE_STATE_DIR=/work/state
+export SLOW4MORE_CONFIG=/work/slow4more-config.json
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8399
 export ANTHROPIC_API_KEY=sk-ant-stub-not-a-real-key
 export DISABLE_TELEMETRY=1
@@ -24,7 +24,7 @@ for i in $(seq 1 20); do
 done
 
 # Short cache TTL so the test finishes quickly: sleep cap = 30 * 0.8 = 24s.
-cat > "$CC_SLOWER_CONFIG" <<'JSON'
+cat > "$SLOW4MORE_CONFIG" <<'JSON'
 {
   "provider": "file",
   "usage_file": "/work/usage.json",
@@ -45,7 +45,7 @@ cat > /work/proj/.claude/settings.json <<'JSON'
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /repo/hooks/cc_slower.py",
+            "command": "python3 /repo/hooks/slow4more.py",
             "timeout": 120
           }
         ]
@@ -87,7 +87,7 @@ claude -p "$PROMPT" --model claude-stub-1 --allowedTools Bash --max-turns 20 \
 
 echo "--- statusline feeder standalone check"
 echo '{"model":{"display_name":"Stub"},"workspace":{"current_dir":"/work/proj"},"rate_limits":{"five_hour":{"used_percentage":61.5,"resets_at":1234},"seven_day":{"used_percentage":12.5,"resets_at":5678}}}' \
-  | python3 /repo/hooks/cc_slower_statusline.py
+  | python3 /repo/hooks/slow4more_statusline.py
 python3 - <<'PY'
 import json
 d = json.load(open("/work/state/usage.json"))
@@ -97,7 +97,7 @@ print("statusline feeder OK:", json.dumps(d))
 PY
 
 echo "--- hook log tail"
-tail -n 20 /work/state/cc-slower.log 2>/dev/null || echo "(no hook log?)"
+tail -n 20 /work/state/slow4more.log 2>/dev/null || echo "(no hook log?)"
 echo "--- stub request log"
 cat /work/logs/requests.jsonl 2>/dev/null || echo "(no requests?)"
 echo "--- stub stderr tail"

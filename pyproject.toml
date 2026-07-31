@@ -1,4 +1,4 @@
-# Not a package — cc-slower is installed via install.py. This file only
+# Not a package — slow4more is installed via install.py. This file only
 # configures dev tooling.
 
 [tool.ruff]

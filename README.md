@@ -1,6 +1,6 @@
-# cc-slower
+# slow4more
 
-[![CI](https://github.com/bvc3at/cc-slower/actions/workflows/ci.yml/badge.svg)](https://github.com/bvc3at/cc-slower/actions/workflows/ci.yml)
+[![CI](https://github.com/bvc3at/slow4more/actions/workflows/ci.yml/badge.svg)](https://github.com/bvc3at/slow4more/actions/workflows/ci.yml)
 
 Adaptive slowdown for Claude Code sessions. When your 5-hour or 7-day usage
 window is burning faster than wall time, a `PreToolUse` hook inserts sleeps
@@ -28,7 +28,7 @@ flowchart TD
 
 - **Usage source (primary):** Claude Code passes official `rate_limits`
   (`five_hour` / `seven_day`, `used_percentage`, `resets_at`) to the
-  statusline command. `hooks/cc_slower_statusline.py` captures that to
+  statusline command. `hooks/slow4more_statusline.py` captures that to
   `usage.json`; your existing statusline keeps working (it gets chained).
 - **Usage source (fallback):** if `usage.json` is missing or stale, the hook
   counts cost-weighted tokens from session transcripts against configurable
@@ -71,14 +71,14 @@ cache the pacing term already reaches the cap, so it changes nothing.
 A pace **lead only matters when the budget is actually running low**. Being
 ahead of pace early — say 51% used with 27% of the window elapsed — usually
 self-corrects, because interactive sessions burst and then idle, so `w(u)`
-keeps cc-slower out of the way until utilization climbs toward the limit, where
+keeps slow4more out of the way until utilization climbs toward the limit, where
 the ramp turns steep. The *same* 24-point lead earns **0 s** at 51% and a
 near-cap sleep at 90%.
 
 #### Racing the window: utilization vs. elapsed
 
 The pace error `e` is the vertical gap between budget spent (bars) and window
-elapsed (line). Bars above the line mean you're ahead of pace; cc-slower only
+elapsed (line). Bars above the line mean you're ahead of pace; slow4more only
 leans in as the bars climb into the top-right corner.
 
 ```mermaid
@@ -138,7 +138,7 @@ Requires Python ≥ 3.9. Stdlib only — nothing to `pip install`.
 
 ```bash
 python3 install.py            # dry-run: shows what would be written
-python3 install.py --apply    # writes ~/.config/cc-slower/config.json and
+python3 install.py --apply    # writes ~/.config/slow4more/config.json and
                               # merges hook + statusline into ~/.claude/settings.json
 ```
 
@@ -149,7 +149,7 @@ Notes:
   5-minute cache instead (API-key auth, or `FORCE_PROMPT_CACHING_5M=1`):
   the sleep cap derives from the TTL, and a sleep that outlives the cache
   would *add* cost rather than save it.
-- cc-slower targets subscription accounts. API-key auth has no 5h/7d
+- slow4more targets subscription accounts. API-key auth has no 5h/7d
   windows, so the official usage feed never activates there; on API auth
   the tool is only useful as a *self-imposed* spend pacer — configure
   transcript `budgets` for the burn rate you're willing to accept.
@@ -160,8 +160,8 @@ Notes:
 
 ## Configuration
 
-`~/.config/cc-slower/config.json` (all keys optional; defaults in
-`hooks/cc_slower.py`):
+`~/.config/slow4more/config.json` (all keys optional; defaults in
+`hooks/slow4more.py`):
 
 | key | default | meaning |
 |---|---|---|
@@ -178,8 +178,8 @@ Notes:
 | `min_interval_seconds` | 5 | dedupe window for parallel tool calls |
 | `notify_threshold_seconds` | 20 | show a `systemMessage` for sleeps ≥ this |
 
-Environment: `CC_SLOWER_CONFIG` (config path), `CC_SLOWER_STATE_DIR`
-(state/log/usage.json location, default `~/.local/state/cc-slower`).
+Environment: `SLOW4MORE_CONFIG` (config path), `SLOW4MORE_STATE_DIR`
+(state/log/usage.json location, default `~/.local/state/slow4more`).
 
 Calibrating transcript budgets (only matters if you don't use the
 statusline feeder): note the weighted-token total in the state file at some
@@ -196,8 +196,8 @@ End-to-end (isolated container, stub Anthropic API, **no network, no real
 credentials, never touches your `~/.claude`**):
 
 ```bash
-docker build -f tests/e2e/Dockerfile -t cc-slower-test .
-docker run --rm --network none cc-slower-test
+docker build -f tests/e2e/Dockerfile -t slow4more-test .
+docker run --rm --network none slow4more-test
 ```
 
 The container installs its own Claude Code, points `ANTHROPIC_BASE_URL` at a
@@ -224,7 +224,7 @@ for how the harness works.
   error, and it protects the cache while doing so.
 - The OAuth usage-endpoint provider exists but is opt-in only
   (`provider: "oauth"`): the endpoint is undocumented and needs a token you
-  must supply explicitly (`CC_SLOWER_OAUTH_TOKEN`). The statusline route is
+  must supply explicitly (`SLOW4MORE_OAUTH_TOKEN`). The statusline route is
   official and credential-free — prefer it.
 
 ## License

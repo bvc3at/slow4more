@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assert that the cc-slower hook actually delayed API traffic.
+"""Assert that the slow4more hook actually delayed API traffic.
 
 Reads the stub's requests.jsonl, splits main-loop requests by phase marker,
 and compares inter-request gaps: the "high" utilization phase must show
