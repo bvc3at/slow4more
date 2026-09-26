@@ -484,6 +484,7 @@ class TestUsageFileValidity(unittest.TestCase):
         self._snaps()
         wst: dict = self.st['windows']['five_hour']
         self.assertEqual(wst['integral'], 0.0)
+        self.assertEqual(wst['last_error'], 0.0)
         self.assertEqual(wst['last_t'], self.now)
         self.assertEqual(wst['resets_at'], new_reset)
 
