@@ -462,6 +462,18 @@ class TestUsageFileValidity(unittest.TestCase):
         self.assertEqual([s.source for s in snaps], ['transcript'])
         self.assertGreater(snaps[0].utilization, 1.0)
 
+    def test_unreadable_file_falls_back_to_transcript(self) -> None:
+        with open(self.usage, 'w') as f:
+            f.write('{corrupt')
+        self.assertEqual([s.source for s in self._snaps()], ['transcript'])
+
+    def test_fresh_file_without_resets_at_is_used(self) -> None:
+        self._write_usage({'five_hour': {'used_percentage': 4}}, age=60)
+        snaps: list = self._snaps()
+        self.assertEqual([(s.name, s.source) for s in snaps],
+                         [('five_hour', 'file')])
+        self.assertAlmostEqual(snaps[0].utilization, 0.04)
+
     def test_controller_resets_when_window_rolls_over(self) -> None:
         self.st['windows']['five_hour'] = {
             'integral': 3000.0, 'last_error': 0.2, 'last_t': self.now - 900,
