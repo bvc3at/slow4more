@@ -15,7 +15,7 @@ throttling saves).
 flowchart TD
     T[tool call] --> H[PreToolUse hook]
     SL[statusline feeder] -->|writes usage.json| H
-    H --> S{"fresh usage.json?"}
+    H --> S{"usable usage.json?"}
     S -->|yes| U1["official rate_limits: u, elapsed"]
     S -->|no| U2["weighted tokens vs budgets"]
     U1 --> E["pace error: e = u - elapsed"]
@@ -40,9 +40,9 @@ flowchart TD
   not paced until the statusline writes fresh data (the new window starts
   near 0%). Claude Code itself re-runs the statusline at `resets_at` and
   drops the expired window from `rate_limits`.
-- **Usage source (fallback):** only if `usage.json` is missing (or is older
-  than `usage_max_age_seconds` and has no `resets_at`), the hook counts
-  cost-weighted tokens from session transcripts against configurable
+- **Usage source (fallback):** only if `usage.json` is missing or unreadable
+  (or is older than `usage_max_age_seconds` and has no `resets_at`), the hook
+  counts cost-weighted tokens from session transcripts against configurable
   budgets (works offline, needs calibration; transcript format is not a
   stable interface, so this is best-effort).
 - **Controller:** one PI regulator per window, the neediest window wins.
