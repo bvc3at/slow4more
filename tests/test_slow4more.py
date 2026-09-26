@@ -815,6 +815,10 @@ class TestInstaller(unittest.TestCase):
             '--statusline-refresh', '30')
         self.assertEqual(sl['refreshInterval'], 5)
 
+    def test_statusline_refresh_custom_value(self) -> None:
+        sl: dict = self._run_statusline({}, '--statusline-refresh', '30')
+        self.assertEqual(sl['refreshInterval'], 30)
+
     def test_statusline_refresh_zero_leaves_it_unset(self) -> None:
         sl: dict = self._run_statusline({}, '--statusline-refresh', '0')
         self.assertNotIn('refreshInterval', sl)
