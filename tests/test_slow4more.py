@@ -6,12 +6,14 @@ Run:  python3 -m unittest discover -s tests -v
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import importlib.util
 import io
 import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -582,6 +584,37 @@ class TestStatuslineFeeder(unittest.TestCase):
             with open(os.path.join(tmp, 'usage.json')) as f:
                 written: dict = json.load(f)
         self.assertEqual(written['five_hour']['used_percentage'], 6)
+        self.assertIn('written_at', written)
+
+    def test_write_usage_waits_for_lock(self) -> None:
+        reset: float = 4_000_000_000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ['SLOW4MORE_STATE_DIR'] = tmp
+            usage: str = os.path.join(tmp, 'usage.json')
+            try:
+                with open(usage, 'w') as f:
+                    json.dump({'five_hour': {'used_percentage': 9,
+                                             'resets_at': reset}}, f)
+                with open(os.path.join(tmp, 'usage.lock'), 'a+') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    t = threading.Thread(target=feeder.write_usage, args=(
+                        {'five_hour': {'used_percentage': 7,
+                                       'resets_at': reset}}, self.now))
+                    try:
+                        t.start()
+                        t.join(timeout=0.2)
+                        self.assertTrue(t.is_alive())
+                        with open(usage) as f:
+                            self.assertNotIn('written_at', json.load(f))
+                    finally:
+                        fcntl.flock(lock, fcntl.LOCK_UN)
+                t.join(timeout=5)
+                self.assertFalse(t.is_alive())
+                with open(usage) as f:
+                    written: dict = json.load(f)
+            finally:
+                os.environ.pop('SLOW4MORE_STATE_DIR', None)
+        self.assertEqual(written['five_hour']['used_percentage'], 9)
         self.assertIn('written_at', written)
 
 
