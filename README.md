@@ -32,8 +32,9 @@ flowchart TD
   `usage.json`; your existing statusline keeps working (it gets chained).
   Each session only sees the `rate_limits` of its own API responses (main
   conversation and subagents), so the feeder merges instead of overwriting:
-  per window a later `resets_at` wins and the same window keeps the higher
-  `used_percentage`, so an idle session never rolls the file back.
+  per window a later `resets_at` wins, the same window (`resets_at` less
+  than an hour apart) keeps the higher `used_percentage`, and expired
+  windows are dropped, so an idle session never rolls the file back.
 - **Usage source validity:** each `usage.json` window stays valid until its
   `resets_at`, however old the file is — within a window usage only grows, so
   an old snapshot is a lower bound. Once `resets_at` passes, that window is
