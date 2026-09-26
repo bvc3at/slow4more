@@ -44,7 +44,7 @@ DEFAULT_CONFIG = {
     #                  against the budgets below (works offline, needs calibration)
     #   "oauth"      - query an HTTP endpoint that reports window utilization
     #                  (undocumented API; explicit opt-in only)
-    #   "auto"       - file if fresh, else transcript
+    #   "auto"       - usage_file (each window until its resets_at), else transcript
     "provider": "auto",
 
     # Which usage windows to actually pace against, by canonical WINDOWS name.
