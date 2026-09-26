@@ -66,12 +66,17 @@ def merge_windows(existing: dict, incoming: dict, now: float) -> dict:
     merged: dict = {}
     for name in WINDOWS:
         live: list = []
-        for entry in (existing.get(name), incoming.get(name)):
+        for i, entry in enumerate((existing.get(name), incoming.get(name))):
             if not isinstance(entry, dict):
                 live.append(None)
                 continue
             reset: float | None = _resets_at(entry)
-            live.append(entry if reset is None or reset > now else None)
+            # An existing entry without resets_at can't be aged here; carrying
+            # it over would refresh the file mtime the hook ages it by.
+            if reset is None:
+                live.append(entry if i == 1 else None)
+            else:
+                live.append(entry if reset > now else None)
         chosen: dict | None = _pick(live[0], live[1])
         if chosen is not None:
             merged[name] = chosen

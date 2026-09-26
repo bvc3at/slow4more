@@ -553,6 +553,15 @@ class TestStatuslineFeeder(unittest.TestCase):
             self.now)
         self.assertNotIn('five_hour', merged)
 
+    def test_existing_window_without_resets_at_is_not_carried_over(
+            self) -> None:
+        merged: dict = feeder.merge_windows(
+            {'five_hour': {'used_percentage': 80}},
+            {'seven_day': {'used_percentage': 5, 'resets_at': self.now + 9e4}},
+            self.now)
+        self.assertNotIn('five_hour', merged)
+        self.assertIn('seven_day', merged)
+
     def test_main_merges_into_usage_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             os.environ['SLOW4MORE_STATE_DIR'] = tmp
