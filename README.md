@@ -30,8 +30,19 @@ flowchart TD
   (`five_hour` / `seven_day`, `used_percentage`, `resets_at`) to the
   statusline command. `hooks/slow4more_statusline.py` captures that to
   `usage.json`; your existing statusline keeps working (it gets chained).
-- **Usage source (fallback):** if `usage.json` is missing or stale, the hook
-  counts cost-weighted tokens from session transcripts against configurable
+  Each session only sees the `rate_limits` of its own API responses (main
+  conversation and subagents), so the feeder merges instead of overwriting:
+  per window a later `resets_at` wins and the same window keeps the higher
+  `used_percentage`, so an idle session never rolls the file back.
+- **Usage source validity:** each `usage.json` window stays valid until its
+  `resets_at`, however old the file is — within a window usage only grows, so
+  an old snapshot is a lower bound. Once `resets_at` passes, that window is
+  not paced until the statusline writes fresh data (the new window starts
+  near 0%). Claude Code itself re-runs the statusline at `resets_at` and
+  drops the expired window from `rate_limits`.
+- **Usage source (fallback):** only if `usage.json` is missing (or is older
+  than `usage_max_age_seconds` and has no `resets_at`), the hook counts
+  cost-weighted tokens from session transcripts against configurable
   budgets (works offline, needs calibration; transcript format is not a
   stable interface, so this is best-effort).
 - **Controller:** one PI regulator per window, the neediest window wins.
@@ -149,6 +160,12 @@ Notes:
   5-minute cache instead (API-key auth, or `FORCE_PROMPT_CACHING_5M=1`):
   the sleep cap derives from the TTL, and a sleep that outlives the cache
   would *add* cost rather than save it.
+- The installer sets `statusLine.refreshInterval` to 60 s unless you
+  already set one (`--statusline-refresh N`, `0` = leave unset). Without it
+  Claude Code stops re-running the statusline while the main conversation
+  waits on background subagents, so `usage.json` freezes and a long
+  subagent-only burst goes unpaced. Each refresh runs the whole statusline
+  command (the feeder plus any chained statusline) in every open session.
 - slow4more targets subscription accounts. API-key auth has no 5h/7d
   windows, so the official usage feed never activates there; on API auth
   the tool is only useful as a *self-imposed* spend pacer — configure
@@ -165,7 +182,8 @@ Notes:
 
 | key | default | meaning |
 |---|---|---|
-| `provider` | `auto` | `auto` = statusline-fed `usage.json` if fresh, else transcripts. Also: `file`, `transcript`, `oauth` |
+| `provider` | `auto` | `auto` = statusline-fed `usage.json` (each window valid until its `resets_at`), else transcripts. Also: `file`, `transcript`, `oauth` |
+| `usage_max_age_seconds` | 600 | `usage.json` windows *without* `resets_at` are ignored once the file is older than this |
 | `enforce_windows` | `["five_hour"]` | which usage windows to pace against. Omitting the key uses the default `["five_hour"]`; `["five_hour","seven_day"]` enables both; `[]` disables throttling entirely; `null` selects all known windows |
 | `cache_ttl_seconds` | 300 | prompt cache TTL; sleep cap derives from it |
 | `sleep_cap_fraction` | 0.8 | cap = ttl × fraction |
@@ -217,8 +235,15 @@ for how the harness works.
   so a mis-configured timeout degrades to "less throttling", never to a
   broken session.
 - The statusline only receives `rate_limits` after the first API response of
-  a session, and only for subscription accounts; until then the transcript
-  fallback (or stale-but-recent usage.json) covers the gap.
+  a session, and only for subscription accounts; until then the last
+  `usage.json` covers the gap (each window until its `resets_at`). The
+  transcript fallback applies only when there is no usable `usage.json`.
+- Without `statusLine.refreshInterval` the statusline does not re-run while
+  the main conversation is idle, e.g. while it waits on background subagents
+  (their API responses do update the session's `rate_limits`, but nothing
+  re-runs the statusline to capture them). During such a period the hook
+  paces against the last snapshot (a lower bound), so it can under-throttle
+  a long subagent-only burst. The installer sets the interval for this.
 - Throttling cannot *reduce* what a conversation costs — it spreads the same
   tokens over more wall time so you hit the window reset instead of the hard
   error, and it protects the cache while doing so.
