@@ -548,6 +548,24 @@ class TestStatuslineFeeder(unittest.TestCase):
             self.now)
         self.assertEqual(merged['five_hour'], new)
 
+    def test_same_window_takes_higher_incoming(self) -> None:
+        reset: float = self.now + 3600
+        for incoming_reset in (reset, reset + 3599):
+            incoming: dict = {'used_percentage': 14,
+                              'resets_at': incoming_reset}
+            merged: dict = feeder.merge_windows(
+                {'seven_day': {'used_percentage': 5, 'resets_at': reset}},
+                {'seven_day': incoming}, self.now)
+            self.assertEqual(merged['seven_day'], incoming)
+
+    def test_later_incoming_resets_at_replaces_live_entry(self) -> None:
+        incoming: dict = {'used_percentage': 1,
+                          'resets_at': self.now + cc.WINDOWS['five_hour']}
+        merged: dict = feeder.merge_windows(
+            {'five_hour': {'used_percentage': 80, 'resets_at': self.now + 60}},
+            {'five_hour': incoming}, self.now)
+        self.assertEqual(merged['five_hour'], incoming)
+
     def test_expired_window_dropped_when_payload_lacks_it(self) -> None:
         merged: dict = feeder.merge_windows(
             {'five_hour': {'used_percentage': 50, 'resets_at': self.now - 5}},
