@@ -525,11 +525,8 @@ def file_snapshots(cfg: dict, now: float, log: Log,
 def _track_resets(st: dict, snaps: list, now: float, log: Log) -> list:
     live: list = []
     for snap in snaps:
-        if snap.resets_at is None:
-            live.append(snap)
-            continue
         wst: dict = st['windows'].setdefault(snap.name, {})
-        if now >= snap.resets_at:
+        if snap.resets_at is not None and now >= snap.resets_at:
             if wst.get('expired_at') != snap.resets_at:
                 wst['expired_at'] = snap.resets_at
                 log.info(f'{snap.source} window {snap.name} expired at '
@@ -538,7 +535,9 @@ def _track_resets(st: dict, snaps: list, now: float, log: Log) -> list:
         tracked: float | None = wst.get('resets_at')
         if tracked is not None and now >= tracked:
             wst.update(integral=0.0, last_error=0.0, last_t=now)
-        wst['resets_at'] = snap.resets_at
+            del wst['resets_at']
+        if snap.resets_at is not None:
+            wst['resets_at'] = snap.resets_at
         live.append(snap)
     return live
 

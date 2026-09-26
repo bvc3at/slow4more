@@ -473,6 +473,19 @@ class TestUsageFileValidity(unittest.TestCase):
         self.assertEqual(wst['last_t'], self.now)
         self.assertEqual(wst['resets_at'], new_reset)
 
+    def test_controller_resets_for_resetless_data_after_rollover(
+            self) -> None:
+        self.st['windows']['five_hour'] = {
+            'integral': 3000.0, 'last_error': 0.2, 'last_t': self.now - 900,
+            'resets_at': self.now - 10}
+        self._write_usage({'five_hour': {'used_percentage': 5}}, age=0)
+        self._snaps()
+        wst: dict = self.st['windows']['five_hour']
+        self.assertEqual(wst['integral'], 0.0)
+        self.assertEqual(wst['last_error'], 0.0)
+        self.assertEqual(wst['last_t'], self.now)
+        self.assertNotIn('resets_at', wst)
+
     def test_controller_kept_within_same_window(self) -> None:
         reset: float = self.now + 3600
         self.st['windows']['five_hour'] = {
