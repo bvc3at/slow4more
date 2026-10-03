@@ -5,8 +5,12 @@ Claude Code invokes the configured statusline command with a JSON payload on
 stdin that (for Pro/Max subscribers) includes official `rate_limits` data for
 the 5-hour and 7-day windows. This script:
 
-  1. writes that data to <state_dir>/usage.json (atomic) where the slow4more
-     hook picks it up as its primary usage source, and
+  1. merges that data into <state_dir>/usage.json (atomic, flock-protected)
+     where the slow4more hook picks it up as its primary usage source. Each
+     session only knows the rate_limits of its own API responses, so per
+     window a later resets_at wins, the same window keeps the higher
+     used_percentage, and expired windows are dropped: an idle session's
+     stale view never overwrites a newer one. And it
   2. prints a status line. If you already have a statusline command, pass it
      as arguments (e.g. `slow4more_statusline.py -- ~/bin/my_statusline.sh`)
      and it will be exec'd with the same stdin after the usage file is
@@ -15,12 +19,18 @@ the 5-hour and 7-day windows. This script:
 Stdlib-only, fail-open: any error still prints a status line and exits 0.
 """
 
+from __future__ import annotations
+
+import fcntl
 import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+WINDOWS: tuple = ('five_hour', 'seven_day')
+SAME_WINDOW_SECONDS: float = 3600.0
 
 
 def state_dir() -> Path:
@@ -29,6 +39,66 @@ def state_dir() -> Path:
         return Path(d)
     xdg = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
     return Path(xdg) / "slow4more"
+
+
+def _resets_at(entry: dict) -> float | None:
+    try:
+        return float(entry['resets_at'])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _pick(old: dict | None, new: dict | None) -> dict | None:
+    if old is None or new is None:
+        return new or old
+    old_reset: float | None = _resets_at(old)
+    new_reset: float | None = _resets_at(new)
+    if old_reset is None or new_reset is None:
+        return new
+    if abs(new_reset - old_reset) >= SAME_WINDOW_SECONDS:
+        return new if new_reset > old_reset else old
+    old_pct: float = float(old.get('used_percentage') or 0)
+    new_pct: float = float(new.get('used_percentage') or 0)
+    return new if new_pct >= old_pct else old
+
+
+def merge_windows(existing: dict, incoming: dict, now: float) -> dict:
+    merged: dict = {}
+    for name in WINDOWS:
+        live: list = []
+        for i, entry in enumerate((existing.get(name), incoming.get(name))):
+            if not isinstance(entry, dict):
+                live.append(None)
+                continue
+            reset: float | None = _resets_at(entry)
+            # An existing entry without resets_at can't be aged here; carrying
+            # it over would refresh the file mtime the hook ages it by.
+            if reset is None:
+                live.append(entry if i == 1 else None)
+            else:
+                live.append(entry if reset > now else None)
+        chosen: dict | None = _pick(live[0], live[1])
+        if chosen is not None:
+            merged[name] = chosen
+    return merged
+
+
+def write_usage(incoming: dict, now: float) -> None:
+    d: Path = state_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    path: Path = d / 'usage.json'
+    with open(d / 'usage.lock', 'a+') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            existing = json.loads(path.read_text())
+        except (OSError, ValueError):
+            existing = {}
+        out: dict = merge_windows(
+            existing if isinstance(existing, dict) else {}, incoming, now)
+        out['written_at'] = now
+        tmp: Path = d / 'usage.json.tmp'
+        tmp.write_text(json.dumps(out))
+        os.replace(tmp, path)
 
 
 def main() -> int:
@@ -42,7 +112,7 @@ def main() -> int:
     pct = {}
     if isinstance(limits, dict) and limits:
         out = {}
-        for name in ("five_hour", "seven_day"):
+        for name in WINDOWS:
             w = limits.get(name)
             if not isinstance(w, dict):
                 continue
@@ -56,12 +126,7 @@ def main() -> int:
                 out[name] = entry
         if out:
             try:
-                d = state_dir()
-                d.mkdir(parents=True, exist_ok=True)
-                out["written_at"] = time.time()
-                tmp = d / "usage.json.tmp"
-                tmp.write_text(json.dumps(out))
-                os.replace(tmp, d / "usage.json")
+                write_usage(out, time.time())
             except OSError:
                 pass
 

@@ -13,6 +13,10 @@ It merges a PreToolUse hook and (unless --no-statusline) a statusline command
 into the given Claude Code settings file, preserving everything else in it.
 An existing statusline command is chained, not replaced: it keeps rendering
 your status line while slow4more captures the official rate_limits data.
+It also sets statusLine.refreshInterval (--statusline-refresh, default 60 s)
+unless one is already set: Claude Code otherwise stops re-running the
+statusline while the main conversation waits on background subagents, and
+usage.json would freeze for that whole period.
 Other statusLine keys (e.g. "padding") are preserved. Chaining caveat: the
 wrapped command is re-parsed by the shell, so embedded quoting (arguments
 that contain spaces) may be mangled — plain script paths and simple flags
@@ -60,7 +64,14 @@ def main() -> int:
     ap.add_argument("--no-statusline", action="store_true",
                     help="skip statusline integration (hook falls back to "
                          "local transcript accounting)")
+    ap.add_argument('--statusline-refresh', type=int, default=60,
+                    help='statusLine.refreshInterval in seconds, so usage.json '
+                         'stays current while only background subagents run '
+                         '(default 60; 0 = do not set; an existing value is '
+                         'kept)')
     args = ap.parse_args()
+    if args.statusline_refresh < 0:
+        ap.error('--statusline-refresh must be >= 0')
 
     for f in (HOOK, FEEDER):
         if not f.exists():
@@ -101,7 +112,9 @@ def main() -> int:
                 cmd = f"{cmd} -- {existing}"
             # Update in place so keys like "padding" survive.
             sl.update({"type": "command", "command": cmd})
-            settings["statusLine"] = sl
+        if args.statusline_refresh > 0:
+            sl.setdefault('refreshInterval', args.statusline_refresh)
+        settings["statusLine"] = sl
 
     config_path = Path(args.config)
     config = {

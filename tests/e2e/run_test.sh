@@ -86,13 +86,13 @@ claude -p "$PROMPT" --model claude-stub-1 --allowedTools Bash --max-turns 20 \
   >/work/logs/claude-high.log 2>&1 || echo "claude(high) exit=$?"
 
 echo "--- statusline feeder standalone check"
-echo '{"model":{"display_name":"Stub"},"workspace":{"current_dir":"/work/proj"},"rate_limits":{"five_hour":{"used_percentage":61.5,"resets_at":1234},"seven_day":{"used_percentage":12.5,"resets_at":5678}}}' \
+echo '{"model":{"display_name":"Stub"},"workspace":{"current_dir":"/work/proj"},"rate_limits":{"five_hour":{"used_percentage":61.5,"resets_at":4000000000},"seven_day":{"used_percentage":12.5,"resets_at":4000500000}}}' \
   | python3 /repo/hooks/slow4more_statusline.py
 python3 - <<'PY'
 import json
 d = json.load(open("/work/state/usage.json"))
 assert d["five_hour"]["used_percentage"] == 61.5, d
-assert d["seven_day"]["resets_at"] == 5678, d
+assert d["seven_day"]["resets_at"] == 4000500000, d
 print("statusline feeder OK:", json.dumps(d))
 PY
 

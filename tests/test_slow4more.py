@@ -3,13 +3,17 @@
 Run:  python3 -m unittest discover -s tests -v
 """
 
+from __future__ import annotations
+
 import contextlib
+import fcntl
 import importlib.util
 import io
 import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -19,6 +23,12 @@ spec = importlib.util.spec_from_file_location(
 cc = importlib.util.module_from_spec(spec)
 sys.modules["slow4more"] = cc
 spec.loader.exec_module(cc)
+
+_feeder_spec = importlib.util.spec_from_file_location(
+    'slow4more_statusline', ROOT / 'hooks' / 'slow4more_statusline.py')
+feeder = importlib.util.module_from_spec(_feeder_spec)
+sys.modules['slow4more_statusline'] = feeder
+_feeder_spec.loader.exec_module(feeder)
 
 _inst_spec = importlib.util.spec_from_file_location(
     "install", ROOT / "install.py")
@@ -386,6 +396,259 @@ class TestWindowSelection(unittest.TestCase):
         self.assertEqual(self._names(cfg), ["five_hour", "seven_day"])
 
 
+class TestUsageFileValidity(unittest.TestCase):
+    """A usage.json window is trusted until its resets_at, never replaced by
+    the transcript estimate while the file exists."""
+
+    def setUp(self) -> None:
+        self.tmp: tempfile.TemporaryDirectory = tempfile.TemporaryDirectory()
+        os.environ['SLOW4MORE_STATE_DIR'] = self.tmp.name
+        self.now: float = 2_000_000.0
+        self.usage: str = os.path.join(self.tmp.name, 'usage.json')
+        self.st: dict = fresh_state()
+        self.st['events'][str(int(self.now // 60) * 60 - 60)] = 10_000_000.0
+
+    def tearDown(self) -> None:
+        os.environ.pop('SLOW4MORE_STATE_DIR', None)
+        self.tmp.cleanup()
+
+    def _write_usage(self, windows: dict, age: float) -> None:
+        with open(self.usage, 'w') as f:
+            json.dump(windows, f)
+        mtime: float = self.now - age
+        os.utime(self.usage, (mtime, mtime))
+
+    def _snaps(self, provider: str = 'auto', log_level: str = 'off',
+               now: float | None = None) -> list:
+        cfg: dict = make_cfg(provider=provider, log_level=log_level)
+        return cc.get_snapshots(self.st, cfg, now or self.now, cc.Log(cfg))
+
+    def test_stale_file_trusted_until_resets_at(self) -> None:
+        self._write_usage({'five_hour': {
+            'used_percentage': 4, 'resets_at': self.now + 3600}}, age=3000)
+        snaps: list = self._snaps()
+        self.assertEqual([(s.name, s.source) for s in snaps],
+                         [('five_hour', 'file')])
+        self.assertAlmostEqual(snaps[0].utilization, 0.04)
+
+    def test_expired_window_dropped_without_transcript_fallback(self) -> None:
+        self._write_usage({'five_hour': {
+            'used_percentage': 99, 'resets_at': self.now - 60}}, age=3000)
+        snaps: list = self._snaps()
+        self.assertEqual(snaps, [])
+        self.assertEqual(
+            cc.compute_sleep(snaps, self.st, make_cfg(), self.now).sleep, 0.0)
+
+    def test_dropped_window_is_not_replaced_by_transcript(self) -> None:
+        self._write_usage({'seven_day': {
+            'used_percentage': 13,
+            'resets_at': self.now + 86400}}, age=3000)
+        self.assertEqual(self._snaps(), [])
+
+    def test_file_provider_ignores_expired_hard_limit_snapshot(self) -> None:
+        self._write_usage({'five_hour': {
+            'used_percentage': 99, 'resets_at': self.now - 60}}, age=0)
+        self.assertEqual(self._snaps(provider='file'), [])
+
+    def test_stale_file_without_resets_at_falls_back_to_transcript(
+            self) -> None:
+        self._write_usage({'five_hour': {'used_percentage': 4}}, age=3000)
+        snaps: list = self._snaps()
+        self.assertEqual([(s.name, s.source) for s in snaps],
+                         [('five_hour', 'transcript')])
+
+    def test_missing_file_falls_back_to_transcript(self) -> None:
+        snaps: list = self._snaps()
+        self.assertEqual([s.source for s in snaps], ['transcript'])
+        self.assertGreater(snaps[0].utilization, 1.0)
+
+    def test_unreadable_file_falls_back_to_transcript(self) -> None:
+        with open(self.usage, 'w') as f:
+            f.write('{corrupt')
+        self.assertEqual([s.source for s in self._snaps()], ['transcript'])
+
+    def test_fresh_file_without_resets_at_is_used(self) -> None:
+        self._write_usage({'five_hour': {'used_percentage': 4}}, age=60)
+        snaps: list = self._snaps()
+        self.assertEqual([(s.name, s.source) for s in snaps],
+                         [('five_hour', 'file')])
+        self.assertAlmostEqual(snaps[0].utilization, 0.04)
+
+    def test_controller_resets_when_window_rolls_over(self) -> None:
+        self.st['windows']['five_hour'] = {
+            'integral': 3000.0, 'last_error': 0.2, 'last_t': self.now - 900,
+            'resets_at': self.now - 10}
+        new_reset: float = self.now + cc.WINDOWS['five_hour'] - 20
+        self._write_usage({'five_hour': {
+            'used_percentage': 1, 'resets_at': new_reset}}, age=0)
+        self._snaps()
+        wst: dict = self.st['windows']['five_hour']
+        self.assertEqual(wst['integral'], 0.0)
+        self.assertEqual(wst['last_error'], 0.0)
+        self.assertEqual(wst['last_t'], self.now)
+        self.assertEqual(wst['resets_at'], new_reset)
+
+    def test_controller_resets_for_resetless_data_after_rollover(
+            self) -> None:
+        self.st['windows']['five_hour'] = {
+            'integral': 3000.0, 'last_error': 0.2, 'last_t': self.now - 900,
+            'resets_at': self.now - 10}
+        self._write_usage({'five_hour': {'used_percentage': 5}}, age=0)
+        self._snaps()
+        wst: dict = self.st['windows']['five_hour']
+        self.assertEqual(wst['integral'], 0.0)
+        self.assertEqual(wst['last_error'], 0.0)
+        self.assertEqual(wst['last_t'], self.now)
+        self.assertNotIn('resets_at', wst)
+
+    def test_controller_kept_within_same_window(self) -> None:
+        reset: float = self.now + 3600
+        self.st['windows']['five_hour'] = {
+            'integral': 3000.0, 'last_error': 0.2, 'last_t': self.now - 30,
+            'resets_at': reset - 1}
+        self._write_usage({'five_hour': {
+            'used_percentage': 80, 'resets_at': reset}}, age=0)
+        self._snaps()
+        self.assertEqual(self.st['windows']['five_hour']['integral'], 3000.0)
+
+    def test_expiry_logged_once_per_window(self) -> None:
+        self._write_usage({'five_hour': {
+            'used_percentage': 50, 'resets_at': self.now - 60}}, age=0)
+        self._snaps(log_level='info')
+        self._snaps(log_level='info', now=self.now + 30)
+        with open(os.path.join(self.tmp.name, 'slow4more.log')) as f:
+            lines: list = [ln for ln in f if 'expired' in ln]
+        self.assertEqual(len(lines), 1)
+        self.assertIn('file window five_hour', lines[0])
+
+
+class TestStatuslineFeeder(unittest.TestCase):
+    """Sessions report only their own rate_limits; the feeder merges them so
+    an idle session's stale view never overwrites a newer one."""
+
+    now: float = 2_000_000.0
+
+    def test_same_window_keeps_higher_percentage(self) -> None:
+        reset: float = self.now + 3600
+        merged: dict = feeder.merge_windows(
+            {'seven_day': {'used_percentage': 14, 'resets_at': reset}},
+            {'seven_day': {'used_percentage': 5, 'resets_at': reset}},
+            self.now)
+        self.assertEqual(merged['seven_day']['used_percentage'], 14)
+
+    def test_window_missing_from_payload_is_kept(self) -> None:
+        merged: dict = feeder.merge_windows(
+            {'five_hour': {'used_percentage': 6, 'resets_at': self.now + 60}},
+            {'seven_day': {'used_percentage': 5, 'resets_at': self.now + 9e4}},
+            self.now)
+        self.assertEqual(merged['five_hour']['used_percentage'], 6)
+        self.assertEqual(merged['seven_day']['used_percentage'], 5)
+
+    def test_new_window_replaces_expired_one(self) -> None:
+        new: dict = {'used_percentage': 0,
+                     'resets_at': self.now + cc.WINDOWS['five_hour']}
+        merged: dict = feeder.merge_windows(
+            {'five_hour': {'used_percentage': 90, 'resets_at': self.now - 10}},
+            {'five_hour': new}, self.now)
+        self.assertEqual(merged['five_hour'], new)
+
+    def test_later_resets_at_wins(self) -> None:
+        new: dict = {'used_percentage': 1,
+                     'resets_at': self.now + cc.WINDOWS['five_hour']}
+        merged: dict = feeder.merge_windows(
+            {'five_hour': new},
+            {'five_hour': {'used_percentage': 80, 'resets_at': self.now + 60}},
+            self.now)
+        self.assertEqual(merged['five_hour'], new)
+
+    def test_same_window_takes_higher_incoming(self) -> None:
+        reset: float = self.now + 3600
+        for incoming_reset in (reset, reset + 3599):
+            incoming: dict = {'used_percentage': 14,
+                              'resets_at': incoming_reset}
+            merged: dict = feeder.merge_windows(
+                {'seven_day': {'used_percentage': 5, 'resets_at': reset}},
+                {'seven_day': incoming}, self.now)
+            self.assertEqual(merged['seven_day'], incoming)
+
+    def test_later_incoming_resets_at_replaces_live_entry(self) -> None:
+        incoming: dict = {'used_percentage': 1,
+                          'resets_at': self.now + cc.WINDOWS['five_hour']}
+        merged: dict = feeder.merge_windows(
+            {'five_hour': {'used_percentage': 80, 'resets_at': self.now + 60}},
+            {'five_hour': incoming}, self.now)
+        self.assertEqual(merged['five_hour'], incoming)
+
+    def test_expired_window_dropped_when_payload_lacks_it(self) -> None:
+        merged: dict = feeder.merge_windows(
+            {'five_hour': {'used_percentage': 50, 'resets_at': self.now - 5}},
+            {'seven_day': {'used_percentage': 5, 'resets_at': self.now + 9e4}},
+            self.now)
+        self.assertNotIn('five_hour', merged)
+
+    def test_existing_window_without_resets_at_is_not_carried_over(
+            self) -> None:
+        merged: dict = feeder.merge_windows(
+            {'five_hour': {'used_percentage': 80}},
+            {'seven_day': {'used_percentage': 5, 'resets_at': self.now + 9e4}},
+            self.now)
+        self.assertNotIn('five_hour', merged)
+        self.assertIn('seven_day', merged)
+
+    def test_main_merges_into_usage_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ['SLOW4MORE_STATE_DIR'] = tmp
+            reset: float = 4_000_000_000.0
+            with open(os.path.join(tmp, 'usage.json'), 'w') as f:
+                json.dump({'five_hour': {'used_percentage': 6,
+                                         'resets_at': reset}}, f)
+            payload: dict = {'rate_limits': {'five_hour': {
+                'used_percentage': 5, 'resets_at': reset}}}
+            old_stdin, old_argv = sys.stdin, sys.argv
+            sys.stdin, sys.argv = io.StringIO(json.dumps(payload)), ['feeder']
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(feeder.main(), 0)
+            finally:
+                sys.stdin, sys.argv = old_stdin, old_argv
+                os.environ.pop('SLOW4MORE_STATE_DIR', None)
+            with open(os.path.join(tmp, 'usage.json')) as f:
+                written: dict = json.load(f)
+        self.assertEqual(written['five_hour']['used_percentage'], 6)
+        self.assertIn('written_at', written)
+
+    def test_write_usage_waits_for_lock(self) -> None:
+        reset: float = 4_000_000_000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ['SLOW4MORE_STATE_DIR'] = tmp
+            usage: str = os.path.join(tmp, 'usage.json')
+            try:
+                with open(usage, 'w') as f:
+                    json.dump({'five_hour': {'used_percentage': 9,
+                                             'resets_at': reset}}, f)
+                with open(os.path.join(tmp, 'usage.lock'), 'a+') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    t = threading.Thread(target=feeder.write_usage, args=(
+                        {'five_hour': {'used_percentage': 7,
+                                       'resets_at': reset}}, self.now))
+                    try:
+                        t.start()
+                        t.join(timeout=0.2)
+                        self.assertTrue(t.is_alive())
+                        with open(usage) as f:
+                            self.assertNotIn('written_at', json.load(f))
+                    finally:
+                        fcntl.flock(lock, fcntl.LOCK_UN)
+                t.join(timeout=5)
+                self.assertFalse(t.is_alive())
+                with open(usage) as f:
+                    written: dict = json.load(f)
+            finally:
+                os.environ.pop('SLOW4MORE_STATE_DIR', None)
+        self.assertEqual(written['five_hour']['used_percentage'], 9)
+        self.assertIn('written_at', written)
+
+
 class TestHandleEvent(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -515,6 +778,50 @@ class TestInstaller(unittest.TestCase):
     def test_enforce_seven_day_flag_writes_both(self):
         cfg = self._run("--enforce-seven-day")
         self.assertEqual(cfg["enforce_windows"], ["five_hour", "seven_day"])
+
+    def _run_statusline(self, settings: dict, *extra: str) -> dict:
+        with open(self.settings, 'w') as f:
+            json.dump(settings, f)
+        argv: list = ['install.py', '--apply', '--config', self.config,
+                      '--settings', self.settings, *extra]
+        old: list = sys.argv
+        sys.argv = argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(install.main(), 0)
+        finally:
+            sys.argv = old
+        with open(self.settings) as f:
+            return json.load(f)['statusLine']
+
+    def test_statusline_refresh_defaults_to_60(self) -> None:
+        sl: dict = self._run_statusline(
+            {'statusLine': {'type': 'command', 'command': 'my.sh',
+                            'padding': 0}})
+        self.assertEqual(sl['refreshInterval'], 60)
+        self.assertEqual(sl['padding'], 0)
+        self.assertIn('-- my.sh', sl['command'])
+
+    def test_statusline_refresh_added_on_reinstall(self) -> None:
+        sl: dict = self._run_statusline({'statusLine': {
+            'type': 'command',
+            'command': f'python3 {install.FEEDER} -- my.sh'}})
+        self.assertEqual(sl['refreshInterval'], 60)
+
+    def test_statusline_refresh_keeps_existing_value(self) -> None:
+        sl: dict = self._run_statusline(
+            {'statusLine': {'type': 'command', 'command': 'my.sh',
+                            'refreshInterval': 5}},
+            '--statusline-refresh', '30')
+        self.assertEqual(sl['refreshInterval'], 5)
+
+    def test_statusline_refresh_custom_value(self) -> None:
+        sl: dict = self._run_statusline({}, '--statusline-refresh', '30')
+        self.assertEqual(sl['refreshInterval'], 30)
+
+    def test_statusline_refresh_zero_leaves_it_unset(self) -> None:
+        sl: dict = self._run_statusline({}, '--statusline-refresh', '0')
+        self.assertNotIn('refreshInterval', sl)
 
     def test_reinstall_opts_into_seven_day(self):
         first = self._run()

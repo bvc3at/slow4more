@@ -44,7 +44,7 @@ DEFAULT_CONFIG = {
     #                  against the budgets below (works offline, needs calibration)
     #   "oauth"      - query an HTTP endpoint that reports window utilization
     #                  (undocumented API; explicit opt-in only)
-    #   "auto"       - file if fresh, else transcript
+    #   "auto"       - usage_file (each window until its resets_at), else transcript
     "provider": "auto",
 
     # Which usage windows to actually pace against, by canonical WINDOWS name.
@@ -136,7 +136,9 @@ DEFAULT_CONFIG = {
     # file provider: path to a JSON file, shape documented in README.
     # null = <state_dir>/usage.json (where the statusline feeder writes).
     "usage_file": None,
-    # Ignore usage_file snapshots older than this (falls back to transcript).
+    # A usage_file window with resets_at stays valid until then, whatever the
+    # file's age. Windows without resets_at are ignored once the file is older
+    # than this; if none remain, auto falls back to transcript.
     "usage_max_age_seconds": 600,
 
     # Show a user-visible note when a sleep exceeds this many seconds
@@ -218,7 +220,8 @@ EMPTY_STATE = {
     "sessions": {},        # sid -> {offset, transcript_path, last_sleep_end,
                            #         last_notify, seen_ids: [..], updated}
     "events": {},          # str(minute_epoch) -> weighted tokens
-    "windows": {},         # name -> {start, integral, last_error, last_t}
+    "windows": {},         # name -> {start, integral, last_error, last_t,
+                           #         resets_at, expired_at}
     "oauth_cache": None,   # {fetched, data}
 }
 
@@ -283,6 +286,8 @@ class WindowSnapshot:
     name: str                 # "five_hour" | "seven_day"
     utilization: float        # 0..1+ fraction of the window budget consumed
     elapsed_fraction: float   # 0..1 fraction of the window's wall time elapsed
+    resets_at: float | None = None
+    source: str = ''
 
 
 def _weighted(usage: dict, weights: dict) -> float:
@@ -400,11 +405,13 @@ def transcript_snapshots(st: dict, cfg: dict, now: float) -> list:
             name=name,
             utilization=used / budget if budget > 0 else 0.0,
             elapsed_fraction=min(1.0, (now - start) / length),
+            source='transcript',
         ))
     return snaps
 
 
-def _parse_utilization_payload(data: dict, now: float) -> list:
+def _parse_utilization_payload(data: dict, now: float,
+                               source: str = '') -> list:
     """Tolerant parser for utilization JSON (oauth endpoint or usage_file).
 
     Accepts {"five_hour": {"utilization": 0.62, "resets_at": <epoch|iso>}, ...}
@@ -442,6 +449,7 @@ def _parse_utilization_payload(data: dict, now: float) -> list:
             continue
         length = WINDOWS[name]
         elapsed = None
+        resets_epoch: float | None = None
         resets = val.get("resets_at", val.get("reset_at"))
         if resets is not None:
             try:
@@ -449,7 +457,8 @@ def _parse_utilization_payload(data: dict, now: float) -> list:
                     import datetime
                     resets = datetime.datetime.fromisoformat(
                         resets.replace("Z", "+00:00")).timestamp()
-                remaining = max(0.0, float(resets) - now)
+                resets_epoch = float(resets)
+                remaining = max(0.0, resets_epoch - now)
                 elapsed = min(1.0, max(0.0, 1.0 - remaining / length))
             except (ValueError, TypeError):
                 elapsed = None
@@ -457,7 +466,7 @@ def _parse_utilization_payload(data: dict, now: float) -> list:
             # Without a reset time, assume we're mid-window; this makes the
             # controller act on absolute utilization only, conservatively.
             elapsed = 0.5
-        snaps.append(WindowSnapshot(name, u, elapsed))
+        snaps.append(WindowSnapshot(name, u, elapsed, resets_epoch, source))
     return snaps
 
 
@@ -465,7 +474,8 @@ def oauth_snapshots(st: dict, cfg: dict, now: float, log: Log) -> list:
     o = cfg["oauth"]
     cache = st.get("oauth_cache")
     if cache and now - cache.get("fetched", 0) < o["cache_seconds"]:
-        return _parse_utilization_payload(cache.get("data") or {}, now)
+        return _parse_utilization_payload(
+            cache.get("data") or {}, now, 'oauth')
     token = os.environ.get(o["token_env"] or "", "")
     if not token and o.get("token_file"):
         try:
@@ -484,36 +494,64 @@ def oauth_snapshots(st: dict, cfg: dict, now: float, log: Log) -> list:
     except Exception as e:  # noqa: BLE001 - any network failure -> fall back
         log.info(f"oauth usage fetch failed: {e}")
         st["oauth_cache"] = {"fetched": now, "data": (cache or {}).get("data")}
-        return _parse_utilization_payload((cache or {}).get("data") or {}, now)
+        return _parse_utilization_payload(
+            (cache or {}).get("data") or {}, now, 'oauth')
     st["oauth_cache"] = {"fetched": now, "data": data}
-    return _parse_utilization_payload(data, now)
+    return _parse_utilization_payload(data, now, 'oauth')
 
 
 def usage_file_path(cfg: dict) -> Path:
     return Path(cfg.get("usage_file") or (state_dir() / "usage.json"))
 
 
-def file_snapshots(cfg: dict, now: float, log: Log, check_age: bool = True) -> list:
-    path = usage_file_path(cfg)
+def file_snapshots(cfg: dict, now: float, log: Log,
+                   check_age: bool = True) -> list | None:
+    path: Path = usage_file_path(cfg)
     try:
-        if check_age and now - path.stat().st_mtime > cfg["usage_max_age_seconds"]:
-            log.debug(f"usage_file stale, ignoring: {path}")
-            return []
+        age: float = now - path.stat().st_mtime
         with open(path) as f:
-            return _parse_utilization_payload(json.load(f), now)
+            snaps: list = _parse_utilization_payload(json.load(f), now, 'file')
     except (OSError, ValueError) as e:
-        log.debug(f"usage_file unavailable ({e})")
-        return []
+        log.debug(f'usage_file unavailable ({e})')
+        return None
+    if check_age and age > cfg['usage_max_age_seconds']:
+        snaps = [s for s in snaps if s.resets_at is not None]
+        if not snaps:
+            log.debug(f'usage_file stale, ignoring: {path}')
+            return None
+    return snaps
+
+
+def _track_resets(st: dict, snaps: list, now: float, log: Log) -> list:
+    live: list = []
+    for snap in snaps:
+        wst: dict = st['windows'].setdefault(snap.name, {})
+        if snap.resets_at is not None and now >= snap.resets_at:
+            if wst.get('expired_at') != snap.resets_at:
+                wst['expired_at'] = snap.resets_at
+                log.info(f'{snap.source} window {snap.name} expired at '
+                         f'{snap.resets_at:.0f}; not paced until fresh data')
+            continue
+        tracked: float | None = wst.get('resets_at')
+        if tracked is not None and now >= tracked:
+            wst.update(integral=0.0, last_error=0.0, last_t=now)
+            del wst['resets_at']
+        if snap.resets_at is not None:
+            wst['resets_at'] = snap.resets_at
+        live.append(snap)
+    return live
 
 
 def get_snapshots(st: dict, cfg: dict, now: float, log: Log) -> list:
     provider = cfg.get("provider", "auto")
     if provider == "file":
-        snaps = file_snapshots(cfg, now, log, check_age=False)
+        snaps = file_snapshots(cfg, now, log, check_age=False) or []
     elif provider == "oauth":
         snaps = oauth_snapshots(st, cfg, now, log)
     elif provider == "auto":
-        snaps = file_snapshots(cfg, now, log) or transcript_snapshots(st, cfg, now)
+        snaps = file_snapshots(cfg, now, log)
+        if snaps is None:
+            snaps = transcript_snapshots(st, cfg, now)
     else:
         snaps = transcript_snapshots(st, cfg, now)
     # Enforce only the configured windows (default: 5-hour only). Filtering
@@ -522,7 +560,7 @@ def get_snapshots(st: dict, cfg: dict, now: float, log: Log) -> list:
     enforce = cfg.get("enforce_windows")
     if enforce is None:
         enforce = list(WINDOWS)
-    return [s for s in snaps if s.name in enforce]
+    return _track_resets(st, [s for s in snaps if s.name in enforce], now, log)
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +658,7 @@ def compute_sleep(snaps: list, st: dict, cfg: dict, now: float) -> Decision:
                 "e": round(e, 4),
                 "w": round(w, 4),
                 "integral_h": round(integral / 3600.0, 4),
+                'source': snap.source,
             })
 
     if best.sleep < cfg["min_sleep_seconds"]:
